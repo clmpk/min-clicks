@@ -37,16 +37,19 @@ struct ConnectionCacheEntry {
 inline uint32_t contactClosure(uint32_t members, const Step &st) {
     uint32_t closure = members;
     for (int v = 0; v < int(st.contacts.size()); ++v) {
-        if (members >> v & 1)
+        if (members >> v & 1) {
             continue;
+        }
         bool contained = true;
-        for (uint32_t contact : st.contacts[v])
+        for (uint32_t contact : st.contacts[v]) {
             if (!(contact & members)) {
                 contained = false;
                 break;
             }
-        if (contained)
+        }
+        if (contained) {
             closure |= uint32_t(1) << v;
+        }
     }
     return closure;
 }
@@ -58,11 +61,12 @@ struct ContactPartition {
         if (st.futureSignatures.size() == st.contacts.size()) {
             array<uint64_t, 32> signatures{};
             uint32_t present = 0;
-            for (int v = 0; v < int(st.contacts.size()); ++v)
+            for (int v = 0; v < int(st.contacts.size()); ++v) {
                 if (unsigned label = key.label(v)) {
                     present |= uint32_t(1) << label;
                     signatures[label] |= st.futureSignatures[v];
                 }
+            }
             for (uint32_t labels = present; labels; labels &= labels - 1) {
                 uint64_t signature = signatures[countr_zero(labels)];
                 united |= signature;
@@ -71,13 +75,17 @@ struct ContactPartition {
         } else {
             array<uint32_t, 32> members{};
             uint32_t all = 0;
-            for (int v = 0; v < int(st.contacts.size()); ++v)
-                if (unsigned label = key.label(v))
+            for (int v = 0; v < int(st.contacts.size()); ++v) {
+                if (unsigned label = key.label(v)) {
                     all |= members[label] |= uint32_t(1) << v;
+                }
+            }
             united = contactClosure(all, st);
-            for (auto mask : members)
-                if (mask)
+            for (auto mask : members) {
+                if (mask) {
                     components[count++] = contactClosure(mask, st);
+                }
+            }
         }
         sort(components.begin(), components.begin() + count);
     }
@@ -86,20 +94,27 @@ struct ContactPartition {
 // needs a distinct fine anchor so it cannot add a new seed liability.
 inline bool contactCoarsens(const ContactPartition &coarse,
                             const ContactPartition &fine) {
-    if (coarse.united != fine.united || coarse.count > fine.count)
+    if (coarse.united != fine.united || coarse.count > fine.count) {
         return false;
-    if (coarse.count == 0)
+    }
+    if (coarse.count == 0) {
         return fine.count == 0;
-    if (coarse.count == 1)
+    }
+    if (coarse.count == 1) {
         return true;
+    }
     array<uint32_t, 24> eligible{};
     uint32_t covered = 0;
-    for (size_t c = 0; c < coarse.count; ++c)
-        for (size_t f = 0; f < fine.count; ++f)
-            if (!(fine.components[f] & ~coarse.components[c]))
+    for (size_t c = 0; c < coarse.count; ++c) {
+        for (size_t f = 0; f < fine.count; ++f) {
+            if (!(fine.components[f] & ~coarse.components[c])) {
                 covered |= eligible[c] |= uint32_t(1) << f;
-    if (covered != (uint32_t(1) << fine.count) - 1)
+            }
+        }
+    }
+    if (covered != (uint32_t(1) << fine.count) - 1) {
         return false;
+    }
     array<int, 24> match;
     match.fill(-1);
     auto augment = [&](auto &&self, int c, uint32_t &seen) -> bool {
@@ -117,8 +132,9 @@ inline bool contactCoarsens(const ContactPartition &coarse,
     };
     for (int c = 0; c < int(coarse.count); ++c) {
         uint32_t seen = 0;
-        if (!augment(augment, c, seen))
+        if (!augment(augment, c, seen)) {
             return false;
+        }
     }
     return true;
 }
@@ -131,8 +147,9 @@ inline array<ConnectionResult, 2> connectionTransitions(const PackedKey &key,
         original[j] = uint8_t(key.label(j));
         highest = max(highest, unsigned(original[j]));
     }
-    for (int j = old; j < count - 1; ++j)
+    for (int j = old; j < count - 1; ++j) {
         original[j] = uint8_t(++highest);
+    }
     array<ConnectionResult, 2> result;
     for (int take = 0; take <= 1; ++take) {
         auto labels = original;
@@ -140,12 +157,15 @@ inline array<ConnectionResult, 2> connectionTransitions(const PackedKey &key,
             unsigned component = highest + 1;
             labels[count - 1] = uint8_t(component);
             uint32_t merged = 0;
-            for (int j : st.neighbors)
+            for (int j : st.neighbors) {
                 merged |= uint32_t(1) << labels[j];
+            }
             merged &= ~uint32_t(1);
-            for (int j = 0; j < count - 1; ++j)
-                if (merged >> labels[j] & 1)
+            for (int j = 0; j < count - 1; ++j) {
+                if (merged >> labels[j] & 1) {
                     labels[j] = uint8_t(component);
+                }
+            }
         }
         uint32_t present = 0, surviving = 0;
         for (int j = 0; j < count; ++j)
@@ -156,8 +176,9 @@ inline array<ConnectionResult, 2> connectionTransitions(const PackedKey &key,
         for (int j = 0; j < (int)st.keep.size(); ++j) {
             unsigned label = labels[st.keep[j]];
             surviving |= uint32_t(1) << label;
-            if (label && !rename[label])
+            if (label && !rename[label]) {
                 rename[label] = uint8_t(++fresh);
+            }
             out.put(j, rename[label]);
         }
         {
@@ -166,18 +187,21 @@ inline array<ConnectionResult, 2> connectionTransitions(const PackedKey &key,
             // preserve each component's contact union. Factors/witnesses retain
             // actual choices.
             array<uint32_t, 32> members{};
-            for (int j = 0; j < (int)st.keep.size(); ++j)
-                if (out.label(j))
+            for (int j = 0; j < (int)st.keep.size(); ++j) {
+                if (out.label(j)) {
                     members[out.label(j)] |= uint32_t(1) << j;
-            for (int j = 0; j < (int)st.keep.size(); ++j)
+                }
+            }
+            for (int j = 0; j < (int)st.keep.size(); ++j) {
                 if (!out.label(j)) {
                     for (unsigned label = 1; label <= fresh; ++label) {
                         bool covered = true;
-                        for (uint32_t contact : st.contacts[j])
+                        for (uint32_t contact : st.contacts[j]) {
                             if (!(members[label] & contact)) {
                                 covered = false;
                                 break;
                             }
+                        }
                         if (covered) {
                             out.put(j, label);
                             members[label] |= uint32_t(1) << j;
@@ -185,34 +209,43 @@ inline array<ConnectionResult, 2> connectionTransitions(const PackedKey &key,
                         }
                     }
                 }
-            for (int j = (int)st.keep.size() - 1; j >= 0; --j)
+            }
+            for (int j = (int)st.keep.size() - 1; j >= 0; --j) {
                 if (unsigned label = out.label(j)) {
                     uint32_t others = members[label] & ~(uint32_t(1) << j);
                     bool redundant = others != 0;
-                    for (uint32_t contact : st.contacts[j])
+                    for (uint32_t contact : st.contacts[j]) {
                         if (!(others & contact)) {
                             redundant = false;
                             break;
                         }
-                    if (redundant)
+                    }
+                    if (redundant) {
                         members[label] = others;
+                    }
                 }
+            }
             PackedKey reduced;
             rename.fill(0);
             fresh = 0;
             for (int j = 0; j < (int)st.keep.size(); ++j) {
                 unsigned label = out.label(j);
-                if (!(members[label] >> j & 1))
+                if (!(members[label] >> j & 1)) {
                     continue;
-                if (!rename[label])
+                }
+                if (!rename[label]) {
                     rename[label] = uint8_t(++fresh);
+                }
                 reduced.put(j, rename[label]);
             }
             out = reduced;
         }
-        result[take] = {out.lo, out.hi,
-                        popcount(present & ~surviving & ~uint32_t(1)),
-                        bool(surviving & ~uint32_t(1))};
+        result[take] = {
+            out.lo,
+            out.hi,
+            popcount(present & ~surviving & ~uint32_t(1)),
+            bool(surviving & ~uint32_t(1))
+        };
     }
     return result;
 }
@@ -238,12 +271,15 @@ struct ConnectionPool {
         }
     }
     uint32_t intern(uint64_t lo, uint64_t hi) {
-        if ((keys.size() + 1) * 4 > buckets.size() * 3)
+        if ((keys.size() + 1) * 4 > buckets.size() * 3) {
             rehash(buckets.size() * 2);
+        }
         size_t slot = hash(lo, hi) & (buckets.size() - 1);
         while (buckets[slot]) {
             uint32_t id = buckets[slot] - 1;
-            if (keys[id].lo == lo && keys[id].hi == hi) return id;
+            if (keys[id].lo == lo && keys[id].hi == hi) {
+                return id;
+            }
             slot = (slot + 1) & (buckets.size() - 1);
         }
         uint32_t id = uint32_t(keys.size());
@@ -295,21 +331,30 @@ struct FlatTable {
         key.factors = node.factors;
         return key;
     }
-    void insertPrepared(uint32_t connection, uint64_t factors, int cost,
-                        const uint64_t *source, int take = -1) {
-        if ((nodes.size() + 1) * 4 > buckets.size() * 3)
+    void insertPrepared(
+        uint32_t connection,
+        uint64_t factors,
+        int cost,
+        const uint64_t *source,
+        int take = -1
+    ) {
+        if ((nodes.size() + 1) * 4 > buckets.size() * 3) {
             rehash(buckets.size() * 2);
+        }
         size_t slot = hash(connection, factors) & (buckets.size() - 1);
         while (buckets[slot]) {
             const auto &node = nodes[buckets[slot] - 1];
-            if (node.connection == connection && node.factors == factors) break;
+            if (node.connection == connection && node.factors == factors) {
+                break;
+            }
             slot = (slot + 1) & (buckets.size() - 1);
         }
         size_t index;
         if (buckets[slot]) {
             index = buckets[slot] - 1;
-            if (nodes[index].cost <= cost)
+            if (nodes[index].cost <= cost) {
                 return;
+            }
             nodes[index].cost = cost;
         } else {
             index = nodes.size();
@@ -317,38 +362,51 @@ struct FlatTable {
             buckets[slot] = uint32_t(index + 1);
             choices.resize(choices.size() + words);
         }
-        for (int j = 0; j < words; ++j)
+        for (int j = 0; j < words; ++j) {
             choices[index * words + j] = source[j];
-        if (take >= 0)
+        }
+        if (take >= 0) {
             choices[index * words + take / 64] |= uint64_t(1) << (take % 64);
+        }
     }
     size_t pruneFactors(const Step &st) {
         constexpr size_t crossThreshold = 4;
-        if (nodes.size() < 2 || (st.liveWeights.empty() &&
-            (st.contacts.empty() || nodes.size() < crossThreshold)))
+        if (nodes.size() < 2 || (st.liveWeights.empty()
+            && (st.contacts.empty() || nodes.size() < crossThreshold))
+        ) {
             return 0;
+        }
         // For equal connectivity, c(A)+weight(P(B) minus P(A)) <= c(B)
         // proves that A is no worse for every continuation. See the round-3
         // proof.
         vector<uint32_t> order(nodes.size());
         auto cheaper = [&](uint32_t a, uint32_t b) {
-            if (nodes[a].cost != nodes[b].cost)
+            if (nodes[a].cost != nodes[b].cost) {
                 return nodes[a].cost < nodes[b].cost;
+            }
             return nodes[a].factors > nodes[b].factors;
         };
         // IDs give exact linear-time grouping, regardless of frontier width.
         vector<size_t> offsets(connections.keys.size() + 1);
-        for (const auto &node : nodes) ++offsets[node.connection + 1];
-        for (size_t i = 1; i < offsets.size(); ++i) offsets[i] += offsets[i - 1];
+        for (const auto &node : nodes) {
+            ++offsets[node.connection + 1];
+        }
+        for (size_t i = 1; i < offsets.size(); ++i) {
+            offsets[i] += offsets[i - 1];
+        }
         auto positions = offsets;
-        for (uint32_t i = 0; i < nodes.size(); ++i)
+        for (uint32_t i = 0; i < nodes.size(); ++i) {
             order[positions[nodes[i].connection]++] = i;
-        for (size_t i = 0; i < connections.keys.size(); ++i)
+        }
+        for (size_t i = 0; i < connections.keys.size(); ++i) {
             sort(order.begin() + offsets[i], order.begin() + offsets[i + 1], cheaper);
+        }
         vector<pair<uint64_t, int>> extra;
-        for (auto [bit, w] : st.liveWeights)
-            if (w > 1)
+        for (auto [bit, w] : st.liveWeights) {
+            if (w > 1) {
                 extra.push_back({bit, w - 1});
+            }
+        }
         vector<uint8_t> removed(nodes.size());
         vector<uint32_t> survivors;
         uint32_t lastConnection = ~uint32_t(0);
@@ -364,19 +422,23 @@ struct FlatTable {
                     removed[i] = 1;
                     break;
                 }
-                if (nodes[j].cost == node.cost)
+                if (nodes[j].cost == node.cost) {
                     continue;
+                }
                 int penalty = popcount(missing);
-                for (auto [bit, w] : extra)
-                    if (missing & bit)
+                for (auto [bit, w] : extra) {
+                    if (missing & bit) {
                         penalty += w;
+                    }
+                }
                 if (nodes[j].cost + penalty <= node.cost) {
                     removed[i] = 1;
                     break;
                 }
             }
-            if (!removed[i])
+            if (!removed[i]) {
                 survivors.push_back(i);
+            }
         }
         // Small layers rarely repay cross-partition matching overhead.
         if (nodes.size() >= crossThreshold) {
@@ -395,12 +457,15 @@ struct FlatTable {
             for (size_t first = 0; first < order.size();) {
                 size_t last = first + 1;
                 uint32_t connection = nodes[order[first]].connection;
-                while (last < order.size() && nodes[order[last]].connection == connection)
+                while (last < order.size() && nodes[order[last]].connection == connection) {
                     ++last;
+                }
                 size_t begin = survivorOrder.size();
-                for (size_t j = first; j < last; ++j)
-                    if (!removed[order[j]])
+                for (size_t j = first; j < last; ++j) {
+                    if (!removed[order[j]]) {
                         survivorOrder.push_back(order[j]);
+                    }
+                }
                 if (survivorOrder.size() != begin) {
                     Group group{ContactPartition(connections.unpack(connection), st), begin,
                                 survivorOrder.size()};
@@ -410,18 +475,22 @@ struct FlatTable {
                         group.sizes[c] = uint8_t(size);
                     }
                     sort(group.sizes.begin(),
-                         group.sizes.begin() + group.contacts.count);
+                         group.sizes.begin() + group.contacts.count
+                    );
                     groups.push_back(std::move(group));
                 }
                 first = last;
             }
             sort(groups.begin(), groups.end(), [](const Group &a, const Group &b) {
-                if (a.contacts.united != b.contacts.united)
+                if (a.contacts.united != b.contacts.united) {
                     return a.contacts.united < b.contacts.united;
-                if (a.contacts.count != b.contacts.count)
+                }
+                if (a.contacts.count != b.contacts.count) {
                     return a.contacts.count < b.contacts.count;
-                if (a.population != b.population)
+                }
+                if (a.population != b.population) {
                     return a.population > b.population;
+                }
                 return lexicographical_compare(
                     a.contacts.components.begin(),
                     a.contacts.components.begin() + a.contacts.count,
@@ -430,46 +499,57 @@ struct FlatTable {
             });
             for (size_t start = 0; start < groups.size();) {
                 size_t end = start + 1;
-                while (end < groups.size() && groups[end].contacts.united == groups[start].contacts.united)
+                while (end < groups.size() && groups[end].contacts.united == groups[start].contacts.united) {
                     ++end;
+                }
                 for (size_t f = start + 1; f < end; ++f) {
                     auto &fine = groups[f];
                     for (size_t c = start; c < f; ++c) {
                         const auto &coarse = groups[c];
-                        if (coarse.contacts.count > fine.contacts.count)
+                        if (coarse.contacts.count > fine.contacts.count) {
                             break;
+                        }
                         if (nodes[survivorOrder[coarse.begin]].cost >
-                                nodes[survivorOrder[fine.end - 1]].cost)
+                                nodes[survivorOrder[fine.end - 1]].cost
+                        ) {
                             continue;
+                        }
                         // A coarser partition needs distinct fine anchors.
                         // Their sorted sizes and largest component provide
                         // cheap necessary checks before the exact match test.
                         bool possible = true;
-                        for (int k = 0; k < coarse.contacts.count; ++k)
+                        for (int k = 0; k < coarse.contacts.count; ++k) {
                             if (fine.sizes[k] > coarse.sizes[k]) {
                                 possible = false;
                                 break;
                             }
+                        }
                         if (!possible ||
                             (coarse.contacts.count &&
                              fine.sizes[fine.contacts.count - 1] >
                                  coarse.sizes[coarse.contacts.count - 1]) ||
-                            !contactCoarsens(coarse.contacts, fine.contacts))
+                            !contactCoarsens(coarse.contacts, fine.contacts)
+                        ) {
                             continue;
+                        }
                         for (size_t ti = fine.begin; ti < fine.end; ++ti) {
                             uint32_t target = survivorOrder[ti];
-                            if (removed[target])
+                            if (removed[target]) {
                                 continue;
+                            }
                             for (size_t si = coarse.begin; si < coarse.end; ++si) {
                                 uint32_t source = survivorOrder[si];
                                 int allowance = nodes[target].cost - nodes[source].cost;
-                                if (allowance < 0)
+                                if (allowance < 0) {
                                     break;
+                                }
                                 uint64_t missing = nodes[target].factors & ~nodes[source].factors;
                                 int penalty = popcount(missing);
-                                for (auto [bit, weight] : extra)
-                                    if (missing & bit)
+                                for (auto [bit, weight] : extra) {
+                                    if (missing & bit) {
                                         penalty += weight;
+                                    }
+                                }
                                 if (penalty <= allowance) {
                                     removed[target] = 1;
                                     break;
@@ -482,15 +562,17 @@ struct FlatTable {
             }
         }
         size_t kept = 0, old = nodes.size();
-        for (size_t i = 0; i < old; ++i)
+        for (size_t i = 0; i < old; ++i) {
             if (!removed[i]) {
                 if (kept != i) {
                     nodes[kept] = nodes[i];
-                    for (int j = 0; j < words; ++j)
+                    for (int j = 0; j < words; ++j) {
                         choices[kept * words + j] = choices[i * words + j];
+                    }
                 }
                 ++kept;
             }
+        }
         nodes.resize(kept);
         choices.resize(kept * words);
         // Index deliberately stale: next use is clear(), never a lookup.

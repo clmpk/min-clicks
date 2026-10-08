@@ -32,8 +32,15 @@ inline void unique_sort(vector<int> &v) {
     sort(v.begin(), v.end());
     v.erase(unique(v.begin(), v.end()), v.end());
 }
+inline void unique_sort(vector<short> &v) {
+    sort(v.begin(), v.end());
+    v.erase(unique(v.begin(), v.end()), v.end());
+}
 
 inline bool subset(const vector<int> &a, const vector<int> &b) {
+    return includes(b.begin(), b.end(), a.begin(), a.end());
+}
+inline bool subset(const vector<short> &a, const vector<short> &b) {
     return includes(b.begin(), b.end(), a.begin(), a.end());
 }
 

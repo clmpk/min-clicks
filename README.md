@@ -2,7 +2,7 @@
 
 An exact minesweeper minimum-clicks solver, plus implementations for three community heuristics: HZiNi, LZiNi, and 8-Way ZiNi.
 
-The solver finds the minimum number of clicks required to clear a fully known board, including left clicks, flags, and chords. It is written as a standalone C++20 program with no runtime dependencies and can also be compiled to WebAssembly for use in web applications.
+The solver finds the minimum number of clicks required to clear a fully known board, including left clicks, flags, and chords. It is written as a standalone C++23 program with no runtime dependencies and can also be compiled to WebAssembly for use in web applications.
 
 An interactive WebAssembly build is available at the [min-clicks website](https://min-clicks.netlify.app/).
 
@@ -11,7 +11,7 @@ An interactive WebAssembly build is available at the [min-clicks website](https:
 Requires a C++20 compiler. Can be built like any standard C++ project, for example:
 
 ```sh
-g++ -std=c++20 -O3 -DNDEBUG -march=native optimal.cpp -o optimal
+g++ -std=c++23 -O3 -DNDEBUG -march=native -I./include src/exact/*.cpp src/*.cpp *.cpp -o optimal
 ```
 
 ### Compiling to WebAssembly
@@ -19,7 +19,7 @@ g++ -std=c++20 -O3 -DNDEBUG -march=native optimal.cpp -o optimal
 Compiling to WebAssembly requires Emscripten. The default compilation command is:
 
 ```sh
-em++ -std=c++20 -O3 -DNDEBUG -fexceptions \
+em++ -std=c++23 -O3 -DNDEBUG -fexceptions \
              -sMODULARIZE=1 -sEXPORT_ES6=1 -sINVOKE_RUN=0 \
              -sEXPORTED_RUNTIME_METHODS=callMain,UTF8ToString -sENVIRONMENT=worker \
              -sALLOW_MEMORY_GROWTH=1 -sINITIAL_MEMORY=67108864 \
@@ -39,20 +39,24 @@ The easiest way to run the solver is to provide a board from its Llamasweeper UR
 ./optimal "?b=1&m=122a004010g000g80"
 ```
 
-Or specify board dimensions for a random board using the `--random` option: 
+Or specify board dimensions for a random board using the `--random` or `--randomruns` options:
 
 ```sh
 ./optimal --random WIDTH HEIGHT MINES SEED [--64b] [options]
+./optimal --randomruns WIDTH HEIGHT MINES RUNS SEED [--64b] [options]
 ```
 
 The CLI accepts any URL with compatible `b`/`m` parameters, or `b=...&m=...`.
 Random dimensions are 1–99 and mine counts 0–width×height.
-Seeds are unsigned 32-bit integers by default. Add `--64b` to `--random` to use `mt19937_64` and unsigned 64-bit seeds.
+Seeds are unsigned 32-bit integers by default. Add `--64b` to `--random`/`--randomruns` to use `mt19937_64` and unsigned 64-bit seeds.
+
+`--rng-load FILENAME` can be used with any of the previous options to load the rng_state from `FILENAME`. This will overwrite the url, encoded string, and seed of `--random`/`--randomruns`. It will automatically determine whether to use 32-bit or 64-bit rng state based on the file contents.
+`--rng-save FILENAME` can be used to save the rng_state to `FILENAME` after the run. This is useful for reproducing a random board. This file may be device dependant, so it is recommended to use the same architecture, and preferably machine, for loading and saving.
 
 There are **no default time or state limits**. Explicit `--time-limit SECONDS` and `--max-states N` are available; zero means unlimited.
 
 `--quiet` suppresses stderr progress.
-`--witness` includes actions with zero-based x/y coordinates: `F` flag, `O` open, `C` chord. 
+`--witness` includes actions with zero-based x/y coordinates: `F` flag, `O` open, `C` chord. `--witness` is not available for csv output.
 
 Exit codes are 0 success, 1 error, and 2 an explicitly limited exact search.
 
@@ -72,8 +76,23 @@ stdout, with no progress output. Its fields include:
 
 `--all --witness` also returns an `actions` object keyed by `optimal`, `8way`, `lzini`, and `hzini`, each containing `[kind,x,y]` triples.
 `--json` alone gives machine-readable output for the selected algorithm.
+`--csv` alone gives a table-readable output for the selected algorithm.
+`--json-file` and `--csv-file` write the output to a file, in the respective format, instead of stdout.
 A heuristic returns `status: "heuristic"`, `algorithm`, `clicks`, and optionally an actions array.
 LZiNi always uses the better of raw LZiNi and HZiNi, including its action sequence. Thus `minclicks <= lzini <= hzini` and `minclicks <= 8way`.
+
+When `--randomruns ... --all` is used, JSON is chosen (default, `--json`, `--json-file`), and more than one run is selected, the output is still a single JSON object, but with different fields:
+
+| Field | Meaning |
+| --- | --- |
+| `runs` | Number of runs performed |
+| `width`, `height`, `mines` | Board description |
+| `initial_seed` | The seed basis of the run. |
+| `elapsed_time` | Total time spent on the run excluding output writing. |
+| `run_results`  | An array of the normal `--all` JSON outputs for each run, in order. |
+
+`width`, `height`, `mines`, and `algorithm` are not present in the individual run results.
+If the runs used `--rng-load`, `initial_seed` will not be present.
 
 # 5. Algorithm explanation
 

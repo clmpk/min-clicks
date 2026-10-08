@@ -8,13 +8,16 @@ namespace minclicks::detail {
 inline vector<vector<int>> independentParts(const Model &m) {
     int n = int(m.cells.size()), total = int(m.edges.size());
     auto graph = m.edges;
-    for (const auto &factor : m.factors)
+    for (const auto &factor : m.factors) {
         for (size_t j = 1; j < factor.vars.size(); ++j) {
             int a = factor.vars[0], b = factor.vars[j];
             graph[a].push_back(b);
             graph[b].push_back(a);
         }
-    for (auto &adjacent : graph) unique_sort(adjacent);
+    }
+    for (auto &adjacent : graph) {
+        unique_sort(adjacent);
+    }
     // Split biconnected edge blocks, then reunite blocks sharing an optional
     // chord vertex. Only mandatory zero articulation vertices may remain shared.
     // Removing ALL zero cut vertices at once is unsafe: two cut vertices can
@@ -27,7 +30,7 @@ inline vector<vector<int>> independentParts(const Model &m) {
     int time = 0;
     auto dfs = [&](auto &&self, int v, int parent) -> void {
         discovered[v] = low[v] = time++;
-        for (int u : graph[v])
+        for (int u : graph[v]) {
             if (u != parent) {
                 if (discovered[u] < 0) {
                     edgeStack.push_back({v, u});
@@ -39,11 +42,15 @@ inline vector<vector<int>> independentParts(const Model &m) {
                         do {
                             edge = edgeStack.back();
                             edgeStack.pop_back();
-                            for (int endpoint : {edge.first, edge.second})
+                            for (int endpoint : {edge.first, edge.second}) {
                                 if (endpoint < n) {
-                                    if (anchor < 0) anchor = endpoint;
-                                    else samePiece.join(anchor, endpoint);
+                                    if (anchor < 0) {
+                                        anchor = endpoint;
+                                    } else {
+                                        samePiece.join(anchor, endpoint);
+                                    }
                                 }
+                            }
                         } while (edge != pair{v, u});
                     }
                 } else if (discovered[u] < discovered[v]) {
@@ -51,9 +58,13 @@ inline vector<vector<int>> independentParts(const Model &m) {
                     low[v] = min(low[v], discovered[u]);
                 }
             }
+        }
     };
-    for (int v = 0; v < total; ++v)
-        if (discovered[v] < 0) dfs(dfs, v, -1);
+    for (int v = 0; v < total; ++v) {
+        if (discovered[v] < 0) {
+            dfs(dfs, v, -1);
+        }
+    }
     vector<vector<int>> parts;
     vector<int> partFor(n, -1);
     for (int v = 0; v < n; ++v) {

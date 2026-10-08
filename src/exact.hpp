@@ -22,11 +22,13 @@ struct ExactOptions {
     void report(const char *phase, int completed, int total, size_t states,
                 size_t peak, int best, double elapsed, size_t transitions,
                 bool force = false) const {
-        if (!onProgress)
+        if (!onProgress) {
             return;
+        }
         auto now = std::chrono::steady_clock::now();
-        if (!force && now - lastProgress < std::chrono::milliseconds(200))
+        if (!force && now - lastProgress < std::chrono::milliseconds(200)) {
             return;
+        }
         lastProgress = now;
         onProgress({phase, completed, total, states, peak, best, elapsed,
                     transitions});
@@ -37,9 +39,8 @@ struct ExactOptions {
 };
 struct ExactResult {
     bool exact = false;
-    int clicks = 0;
-    std::array<int, 4>
-        breakdown{}; // Flags, chords, component seeds, direct targets.
+    CellType clicks = 0;
+    std::array<int, 4> breakdown{};  // Flags, chords, component seeds, direct targets.
     std::vector<Action> actions;
     size_t peak = 0, transitions = 0, dominated = 0;
     int completed = 0, candidates = 0, removed = 0, maxConn = 0, maxFactors = 0,
