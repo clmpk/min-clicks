@@ -122,6 +122,29 @@ inline bool contactCoarsens(const ContactPartition &coarse,
     }
     return true;
 }
+// Splitting a component into k pieces costs at most k-1 extra seeds for
+// every suffix, provided their future contacts reconstruct it exactly.
+// This uses actual future signatures, not the wide-frontier closure fallback:
+// unions of closures need not be the closure of a union.
+inline bool contactRefines(const ContactPartition &fine,
+                           const ContactPartition &coarse) {
+    if (fine.count <= coarse.count || fine.united != coarse.united)
+        return false;
+    array<uint64_t, 24> united{};
+    for (int f = 0; f < fine.count; ++f) {
+        int owner = -1;
+        for (int c = 0; c < coarse.count; ++c)
+            if (!(fine.components[f] & ~coarse.components[c])) {
+                if (owner >= 0) return false;
+                owner = c;
+            }
+        if (owner < 0) return false;
+        united[owner] |= fine.components[f];
+    }
+    for (int c = 0; c < coarse.count; ++c)
+        if (united[c] != coarse.components[c]) return false;
+    return true;
+}
 inline array<ConnectionResult, 2> connectionTransitions(const PackedKey &key,
                                                         const Step &st) {
     int old = (int)st.before.size(), count = (int)st.expanded.size();
@@ -438,8 +461,14 @@ struct FlatTable {
                         const auto &coarse = groups[c];
                         if (coarse.contacts.count > fine.contacts.count)
                             break;
-                        if (nodes[survivorOrder[coarse.begin]].cost >
-                                nodes[survivorOrder[fine.end - 1]].cost)
+                        bool forward = nodes[survivorOrder[coarse.begin]].cost <=
+                            nodes[survivorOrder[fine.end - 1]].cost;
+                        int seedCharge = fine.contacts.count - coarse.contacts.count;
+                        bool reverse = seedCharge > 0 &&
+                            st.futureSignatures.size() == st.contacts.size() &&
+                            nodes[survivorOrder[fine.begin]].cost + seedCharge <=
+                                nodes[survivorOrder[coarse.end - 1]].cost;
+                        if (!forward && !reverse)
                             continue;
                         // A coarser partition needs distinct fine anchors.
                         // Their sorted sizes and largest component provide
@@ -456,26 +485,36 @@ struct FlatTable {
                                  coarse.sizes[coarse.contacts.count - 1]) ||
                             !contactCoarsens(coarse.contacts, fine.contacts))
                             continue;
-                        for (size_t ti = fine.begin; ti < fine.end; ++ti) {
-                            uint32_t target = survivorOrder[ti];
-                            if (removed[target])
-                                continue;
-                            for (size_t si = coarse.begin; si < coarse.end; ++si) {
-                                uint32_t source = survivorOrder[si];
-                                int allowance = nodes[target].cost - nodes[source].cost;
-                                if (allowance < 0)
-                                    break;
-                                uint64_t missing = nodes[target].factors & ~nodes[source].factors;
-                                int penalty = popcount(missing);
-                                for (auto [bit, weight] : extra)
-                                    if (missing & bit)
-                                        penalty += weight;
-                                if (penalty <= allowance) {
-                                    removed[target] = 1;
-                                    break;
+                        auto prune = [&](const Group &sourceGroup,
+                                         const Group &targetGroup, int charge) {
+                            for (size_t ti = targetGroup.begin; ti < targetGroup.end; ++ti) {
+                                uint32_t target = survivorOrder[ti];
+                                if (removed[target])
+                                    continue;
+                                for (size_t si = sourceGroup.begin; si < sourceGroup.end; ++si) {
+                                    uint32_t source = survivorOrder[si];
+                                    int allowance = nodes[target].cost - nodes[source].cost - charge;
+                                    if (allowance < 0)
+                                        break;
+                                    uint64_t missing = nodes[target].factors & ~nodes[source].factors;
+                                    int penalty = popcount(missing);
+                                    for (auto [bit, weight] : extra)
+                                        if (missing & bit)
+                                            penalty += weight;
+                                    if (penalty <= allowance) {
+                                        removed[target] = 1;
+                                        break;
+                                    }
                                 }
                             }
-                        }
+                        };
+                        if (forward) prune(coarse, fine, 0);
+                        // Reverse edges strictly decrease raw cost; forward
+                        // edges never increase it. Equal-cost forward edges
+                        // follow group order, so even removed sources remain
+                        // valid certificates without creating deletion cycles.
+                        if (reverse && contactRefines(fine.contacts, coarse.contacts))
+                            prune(fine, coarse, seedCharge);
                     }
                 }
                 start = end;

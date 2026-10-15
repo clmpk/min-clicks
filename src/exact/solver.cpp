@@ -1,6 +1,7 @@
 #include "../exact.hpp"
 #include "decompose.hpp"
 #include "state.hpp"
+#include "reduce.hpp"
 #include <memory>
 namespace minclicks::detail {
 using Options = ExactOptions;
@@ -17,6 +18,38 @@ struct Result {
     int completed = 0;
     double elapsed = 0;
 };
+static vector<Action> witness(const Model &m, const string &chosen, bool partial = false);
+static PartialSolution previewSolution(const Model &m, const string &chosen) {
+    PartialSolution preview;
+    for (int i = 0; i < int(m.cells.size()); ++i)
+        if ((uint8_t)chosen[i / 8] >> (i % 8) & 1)
+            preview.chords.push_back(m.cells[i]);
+    preview.actions = witness(m, chosen, true);
+    return preview;
+}
+template<class Choices>
+static void reportLayer(const Model &m, const Schedule &sched, const Options &opt,
+                        const Result &result, size_t states, Choices choices) {
+    if (!opt.onProgress) return;
+    PartialSolution preview;
+    if (opt.visualize) {
+        string chosen = choices();
+        // When all states were bounded away, use only the processed part of
+        // the incumbent, rather than presenting future choices as decided.
+        if (!states) {
+            string prefix(chosen.size(), '\0');
+            for (int i = 0; i < result.completed; ++i) {
+                int v = sched.steps[i].var;
+                if ((uint8_t)chosen[v / 8] >> (v % 8) & 1) flip(prefix, v);
+            }
+            chosen = std::move(prefix);
+        }
+        preview = previewSolution(m, chosen);
+    }
+    opt.report("search", result.completed, int(m.cells.size()), states,
+               result.peak, result.best, result.elapsed, result.transitions,
+               opt.visualize, opt.visualize ? &preview : nullptr);
+}
 static Result initial(const Model &m, const Options &opt) {
     Result result;
     int n = (int)m.cells.size();
@@ -203,8 +236,10 @@ static Result solve_reference(const Model &m, const Schedule &sched,
             break;
         states.swap(next);
         ++result.completed;
-        opt.report("search", result.completed, n, states.size(), result.peak,
-                   result.best, seconds(start), result.transitions);
+        result.elapsed = seconds(start);
+        reportLayer(m, sched, opt, result, states.size(), [&] {
+            return states.empty() ? result.chosen : states.begin()->second.chosen;
+        });
         if (opt.progress && seconds(start) - lastLog >= 2) {
             cerr << "DP " << result.completed << '/' << n << ": "
                  << states.size() << " states, " << seconds(start) << " s\n";
@@ -373,9 +408,14 @@ static Result solve_packed(const Model &m, const Schedule &sched,
             break;
         swap(states, next);
         ++result.completed;
-        opt.report("search", result.completed, n, states.nodes.size(),
-                   result.peak, result.best, seconds(start),
-                   result.transitions);
+        result.elapsed = seconds(start);
+        reportLayer(m, sched, opt, result, states.nodes.size(), [&] {
+            if (states.nodes.empty()) return result.chosen;
+            string chosen((n + 7) / 8, '\0');
+            for (int i = 0; i < n; ++i)
+                if (states.choices[i / 64] >> (i % 64) & 1) flip(chosen, i);
+            return chosen;
+        });
         if (opt.progress && seconds(start) - lastLog >= 2) {
             cerr << "DP " << result.completed << '/' << n << ": "
                  << states.nodes.size() << " states, " << seconds(start)
@@ -400,7 +440,7 @@ static Result solve_packed(const Model &m, const Schedule &sched,
     result.elapsed = seconds(start);
     return result;
 }
-static vector<Action> witness(const Model &m, const string &chosen) {
+static vector<Action> witness(const Model &m, const string &chosen, bool partial) {
     const Board &b = m.b;
     int n = (int)m.cells.size();
     vector<bool> selected(b.w * b.h), flags(b.w * b.h), open(b.w * b.h),
@@ -444,7 +484,7 @@ static vector<Action> witness(const Model &m, const string &chosen) {
         }
     };
     // Prefer an island as seed whenever the component contains one.
-    for (const auto &z : b.zeros)
+    if (!partial) for (const auto &z : b.zeros)
         if (!open[z[0]]) {
             actions.push_back({'O', z[0]});
             reveal(z[0]);
@@ -456,7 +496,7 @@ static vector<Action> witness(const Model &m, const string &chosen) {
             reveal(p);
             propagate();
         }
-    for (int p = 0; p < b.w * b.h; ++p)
+    if (!partial) for (int p = 0; p < b.w * b.h; ++p)
         if (!b.mine[p] && !open[p]) {
             actions.push_back({'O', p});
             reveal(p);
@@ -506,6 +546,23 @@ static Model reduceCandidates(const Board &b) {
         vector<int> mineUsers(b.w * b.h);
         for (const auto &scope : mines)
             for (int cell : scope) ++mineUsers[cell];
+        // A failed certificate needs checking again only when one of the
+        // candidates it reads is removed. Swap certificates also read their
+        // replacement's factor neighbors.
+        vector<vector<uint8_t>> related(n, vector<uint8_t>(n));
+        auto intersects = [](const vector<int> &a, const vector<int> &b) {
+            size_t i = 0, j = 0;
+            while (i < a.size() && j < b.size()) {
+                if (a[i] == b[j]) return true;
+                if (a[i] < b[j]) ++i; else ++j;
+            }
+            return false;
+        };
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+                related[i][j] = binary_search(contacts[i].begin(), contacts[i].end(), j) ||
+                    intersects(mines[i], mines[j]) || intersects(bases[i], bases[j]);
+        vector<uint8_t> pendingWitness(n, 1), pendingSwap(n, 1);
     for (;;) {
         int victim = -1;
         for (int i = 0; i < n && victim < 0; ++i)
@@ -594,12 +651,35 @@ static Model reduceCandidates(const Board &b) {
                 if (!exhausted && best <= threshold) victim = v;
             }
         }
-        if (victim < 0) {
-            return Model(m, alive);
-        }
+        if (victim < 0)
+            for (int v = 0; v < n; ++v)
+                if (alive[v] && pendingWitness[v]) {
+                    pendingWitness[v] = 0;
+                    if (witnessDeletion(v, contacts, mines, bases, alive)) {
+                        victim = v;
+                        break;
+                    }
+                }
+        if (victim < 0)
+            for (int v = 0; v < n && victim < 0; ++v)
+                if (alive[v] && pendingSwap[v]) {
+                    pendingSwap[v] = 0;
+                    for (int replacement : contacts[v])
+                        if (alive[replacement] &&
+                            witnessSwap(v, replacement, contacts, mines, bases, alive)) {
+                            victim = v;
+                            break;
+                        }
+                }
+        if (victim < 0) return Model(m, alive);
         alive[victim] = 0;
         active[victim / 64] &= ~(uint64_t(1) << (victim % 64));
         for (int cell : mines[victim]) --mineUsers[cell];
+        for (int v = 0; v < n; ++v)
+            if (related[v][victim]) {
+                pendingWitness[v] = pendingSwap[v] = 1;
+                for (int u : contacts[v]) pendingSwap[u] = 1;
+            }
     }
 }
 static Result searchModel(const Model &m, const Options &opt, Schedule &sched,
@@ -731,6 +811,11 @@ ExactResult solveExact(const Board &b, const ExactOptions &opt) {
         int nonisolatedZeros = int(m.edges.size() - m.cells.size()) - m.isolatedZeros;
         int constant = m.base - (zeroCopies - nonisolatedZeros);
         int best = constant + accumulate(costs.begin(), costs.end(), 0);
+        vector<int> cellVariable;
+        if (opt.visualize && opt.onProgress) {
+            cellVariable.assign(b.w * b.h, -1);
+            for (int v = 0; v < int(m.cells.size()); ++v) cellVariable[m.cells[v]] = v;
+        }
         out.exact = true;
         out.engine = "packed";
         out.order = "components(" + to_string(pieces.size()) + ")";
@@ -742,10 +827,22 @@ ExactResult solveExact(const Board &b, const ExactOptions &opt) {
                 local.onProgress = [&](const Progress &p) {
                     bool hasBound = string(p.phase) == "heuristic" || string(p.phase) == "search";
                     int upper = hasBound && p.best >= 0 ? best - costs[i] + p.best : best;
+                    PartialSolution preview;
+                    if (p.preview) {
+                        // Reconstruct globally: concatenating local witnesses
+                        // could duplicate flags or openings at shared zero nodes.
+                        string combined = chosen;
+                        for (int cell : p.preview->chords) {
+                            int v = cellVariable[cell];
+                            combined[v / 8] |= char(1u << (v % 8));
+                        }
+                        preview = previewSolution(m, combined);
+                    }
                     opt.report(p.phase, out.completed + p.completed, int(m.cells.size()), p.states,
                                max(out.peak, p.peak), upper, seconds(started),
                                out.transitions + p.transitions,
-                               string(p.phase) == "heuristic" && p.completed == 0);
+                               p.preview || (string(p.phase) == "heuristic" && p.completed == 0),
+                               p.preview ? &preview : nullptr);
                 };
             Schedule sched;
             auto r = searchModel(pieces[i], local, sched, false);

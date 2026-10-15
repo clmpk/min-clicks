@@ -5,6 +5,12 @@
 #include <functional>
 
 namespace minclicks {
+// A legal, incomplete play for one representative frontier state. Chord
+// choices can change between layers; this is not the incumbent upper bound.
+struct PartialSolution {
+    std::vector<int> chords; // Physical board cells, including finished pieces.
+    std::vector<Action> actions; // Flags and seeded chord chains; no cleanup opens.
+};
 struct Progress {
     const char *phase;
     int completed, total;
@@ -12,16 +18,18 @@ struct Progress {
     int best;
     double elapsed;
     size_t transitions;
+    const PartialSolution *preview = nullptr; // Valid only during the callback.
 };
 struct ExactOptions {
     double timeLimit = 0; // Zero means unlimited.
     size_t maxStates = 0;
     bool progress = true; // Human-readable stderr progress.
     bool includeActions = true; // Disable witness construction for count-only callers.
+    bool visualize = false; // Opt-in per-candidate progress and partial witnesses.
     std::function<void(const Progress &)> onProgress;
     void report(const char *phase, int completed, int total, size_t states,
                 size_t peak, int best, double elapsed, size_t transitions,
-                bool force = false) const {
+                bool force = false, const PartialSolution *preview = nullptr) const {
         if (!onProgress)
             return;
         auto now = std::chrono::steady_clock::now();
@@ -29,7 +37,7 @@ struct ExactOptions {
             return;
         lastProgress = now;
         onProgress({phase, completed, total, states, peak, best, elapsed,
-                    transitions});
+                    transitions, preview});
     }
 
   private:

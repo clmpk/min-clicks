@@ -198,8 +198,6 @@ Several aspects of the problem can be simplified exactly. These reductions mostl
 X + (1 - X) = 1
 ```
 
-For example, three mine factors and two target factors on the same scope become a constant 2 plus one mine factor.
-
 ### Splitting independent components
 
 The solver also looks for independent components that may be solved separately. A **separator** is a vertex (currently, only zero islands) whose removal disconnects the graph. When separators exist, we can solve each component independently and recover the combined cost:
@@ -239,6 +237,15 @@ The implementation, in [`src/exact/state.hpp`](src/exact/state.hpp), uses radix 
 
 A more complex comparison considers different connectivity partitions whose future contact set is equal. It is only used for large layers (> 1024 states).
 
+**Reverse connectivity dominance**: Previously only a coarser partition could dominate a finer one. Now the finer partition can win when its cost advantage pays for every extra component and its weighted factor disadvantage:
+
+```text
+cost(fine) + components(fine) - components(coarse)
+           + weight(good_bits(coarse) minus good_bits(fine)) <= cost(coarse)
+```
+
+This improvement is credited to llama.
+
 ### Making each state smaller
 
 When possible, state keys are packed into three 64-bit words. This allows up to 24 retained connectivity positions, 31 temporary positions during a transition, and 64 simultaneous factor bits. Larger states use the general engine, which can handle up to 254 connectivity positions and an arbitrary number of factor bits. Many small improvements work together to reduce overhead:
@@ -262,10 +269,12 @@ These values are only indicative, and will vary by CPU and test conditions. Use 
 
 ### Limits
 
-Despite optimizations, the solver has exponential complexity. It is optimized to run on fully connected expert (16-tall) boards, so running it on boards whose smallest dimension exceeds that gets increasingly impractical. Empirically, for fully connected boards, that practicality limit sits around 20-22. Larger boards can still run, provided their density is low enough to allow many zeros.
+Despite optimizations, the solver has exponential complexity. It is optimized to run on fully connected expert (16-tall) boards, so running it on boards whose smallest dimension exceeds that gets increasingly impractical. Empirically, for fully connected boards, that practicality limit sits around 20-22. Larger boards can still run, provided their density is low enough to allow many zeros: most 30x30 boards are solvable, and this limit can occasionally grow to 40x40, or significantly beyond if density is very low.
 
 # 8. Acknowledgements
 
 The core DP idea was first introduced by **qqwref**, but was derived from scratch for this project. 8-way, LZiNi and HZiNi are already existing heuristics: LZiNi and HZiNi are implemented as a C++ translation of Llamasweeper's implementation, while 8-way was independently optimized for this project.
 
 AI played a significant role in late-game optimizations, drafting this document, and writing the [min-clicks website](https://min-clicks.netlify.app/) which hosts an interactive version of the solver, allowing this project to be released in days rather than months.
+
+Several optimization ideas originate from **llama** and **qqwref**, without which this solver would be significantly slower.

@@ -12,7 +12,7 @@
 // clang-format off
 EM_JS(void, browser_progress,
       (const char *phase, int completed, int total, double states, double peak,
-       int best, double elapsed, double transitions),
+       int best, double elapsed, double transitions, const int *actions, int actionCount),
       {
           const callback = Module['onSolverProgress'];
           if (typeof callback === 'function')
@@ -25,7 +25,10 @@ EM_JS(void, browser_progress,
                   best,
                   elapsed,
                   transitions,
-                  heapBytes : HEAPU8.buffer.byteLength
+                  heapBytes : HEAPU8.buffer.byteLength,
+                  // Copy before C++ releases this callback-local buffer. Pairs
+                  // are [ASCII action kind, physical cell], independent of ABI.
+                  preview : actions ? HEAP32.slice(actions >>> 2, (actions >>> 2) + actionCount * 2) : null
               });
       });
 // clang-format on
@@ -110,6 +113,7 @@ int main(int argc, char **argv) {
                      << "  --json      Machine-readable output for one algorithm\n"
                      << "  --witness   Include actions (F flag, O open, C chord)\n"
                      << "  --quiet     Suppress stderr progress\n"
+                     << "  --visualize Per-candidate partial solutions in progress callbacks\n"
                      << "  --time-limit SECONDS / --max-states N (default 0: "
                         "unlimited)\n"
                      << "Exit: 0 success, 2 exact search limited, 1 invalid "
@@ -127,6 +131,7 @@ int main(int argc, char **argv) {
             else if (a == "--json") json = true;
             else if (a == "--quiet") options.progress = false;
             else if (a == "--witness") witness = true;
+            else if (a == "--visualize") options.visualize = true;
             else if (a == "--max-states") {
                 auto n = natural(arg());
                 if (n > numeric_limits<size_t>::max())
@@ -162,9 +167,20 @@ int main(int argc, char **argv) {
 #ifdef __EMSCRIPTEN__
         if (!json)
             options.onProgress = [](const Progress &p) {
+                vector<int> actions;
+                if (p.preview) {
+                    actions.reserve(p.preview->actions.size() * 2 + 1);
+                    for (const auto &action : p.preview->actions) {
+                        actions.push_back(int(action.kind));
+                        actions.push_back(action.cell);
+                    }
+                    // Keep a non-null pointer for an intentionally empty preview.
+                    if (actions.empty()) actions.push_back(0);
+                }
                 browser_progress(p.phase, p.completed, p.total, double(p.states),
                                  double(p.peak), p.best, p.elapsed,
-                                 double(p.transitions));
+                                 double(p.transitions), p.preview ? actions.data() : nullptr,
+                                 p.preview ? int(p.preview->actions.size()) : 0);
             };
 #endif
         ExactResult exact;
