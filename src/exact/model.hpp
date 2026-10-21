@@ -17,12 +17,19 @@ struct Model {
     vector<Factor> factors;
     int base = 0, removed = 0, isolatedZeros = 0;
 
-    explicit Model(const Board &board) : b(board) {
+    explicit Model(const Board &board, const vector<uint8_t> *forbidden = nullptr,
+                   const vector<uint8_t> *protectedCells = nullptr) : b(board) {
         vector<vector<int>> safe(b.w * b.h), mines(b.w * b.h);
         vector<int> candidates;
+        // Boards up to 512 cells (including expert) fit in eight physical-cell words. Expand floods directly
+        // as bit unions, without materializing a long vector per candidate.
+        struct Footprint { array<uint64_t, 8> safe{}, mines{}; };
+        const bool compactBoard = b.w * b.h <= 512;
+        const int footprintWords = (b.w * b.h + 63) / 64;
+        vector<Footprint> footprints(compactBoard ? b.w * b.h : 0);
 
         for (int p = 0; p < b.w * b.h; ++p)
-            if (b.number[p] > 0) {
+            if (b.number[p] > 0 && (!forbidden || !(*forbidden)[p])) {
                 safe[p].push_back(p);
                 for (int q : b.adj[p])
                     (b.mine[q] ? mines[p] : safe[p]).push_back(q);
@@ -38,6 +45,10 @@ struct Model {
                             b.borders[z].end());
             unique_sort(flood[z]);
         }
+        vector<array<uint64_t, 8>> floodMasks(compactBoard ? flood.size() : 0);
+        if (compactBoard)
+            for (size_t z = 0; z < flood.size(); ++z)
+                for (int p : flood[z]) floodMasks[z][p / 64] |= uint64_t(1) << (p % 64);
 
         vector<bool> redundant(b.w * b.h);
 
@@ -48,8 +59,27 @@ struct Model {
                 if (subset(safe[p], region))
                     redundant[p] = true;
 
+            if (compactBoard) {
+                for (int q : safe[p]) footprints[p].safe[q / 64] |= uint64_t(1) << (q % 64);
+                for (int q : mines[p]) footprints[p].mines[q / 64] |= uint64_t(1) << (q % 64);
+                for (int q : b.adj[p])
+                    if (b.island[q] >= 0) {
+                        for (int word = 0; word < footprintWords; ++word)
+                            footprints[p].safe[word] |= floodMasks[b.island[q]][word];
+                    }
+                continue;
+            }
+
+            // A center often touches several cells of the same zero island.
+            // Insert each flood once, rather than repeatedly copying and
+            // sorting its entire region before deduplicating safe[p].
+            array<int, 8> seenIslands{};
+            int seenCount = 0;
             for (int q : b.adj[p])
-                if (b.island[q] >= 0) {
+                if (b.island[q] >= 0 &&
+                    find(seenIslands.begin(), seenIslands.begin() + seenCount,
+                         b.island[q]) == seenIslands.begin() + seenCount) {
+                    seenIslands[seenCount++] = b.island[q];
                     const auto &region = flood[b.island[q]];
                     safe[p].insert(safe[p].end(), region.begin(), region.end());
                 }
@@ -57,15 +87,25 @@ struct Model {
             unique_sort(safe[p]);
         }
 
+        // Compare expanded coverage and flag sets a word at a time instead of scanning flood
+        // vectors for every pair of candidate centers.
+        auto replacedBy = [&](int a, int other) {
+            if (!compactBoard)
+                return subset(safe[a], safe[other]) && subset(mines[other], mines[a]) &&
+                    (safe[a] != safe[other] || mines[a] != mines[other] || other < a);
+            const auto &x = footprints[a], &y = footprints[other];
+            for (int word = 0; word < footprintWords; ++word)
+                if ((x.safe[word] & ~y.safe[word]) || (y.mines[word] & ~x.mines[word]))
+                    return false;
+            return x.safe != y.safe || x.mines != y.mines || other < a;
+        };
         for (int a : candidates) {
-            bool dominated = redundant[a];
+            bool protectedCell = protectedCells && (*protectedCells)[a];
+            bool dominated = redundant[a] && !protectedCell;
 
-            if (!dominated)
+            if (!dominated && !protectedCell)
                 for (int other : candidates)
-                    if (a != other && subset(safe[a], safe[other]) &&
-                        subset(mines[other], mines[a]) &&
-                        (safe[a] != safe[other] || mines[a] != mines[other] ||
-                         other < a)) {
+                    if (a != other && replacedBy(a, other)) {
                         dominated = true;
                         break;
                     }

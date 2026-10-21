@@ -183,7 +183,7 @@ inline array<ConnectionResult, 2> connectionTransitions(const PackedKey &key,
                 rename[label] = uint8_t(++fresh);
             out.put(j, rename[label]);
         }
-        {
+        if (st.contacts.size() == st.keep.size()) {
             // Labels represent future contacts, not necessarily selected
             // physical vertices. Adding or removing representatives must
             // preserve each component's contact union. Factors/witnesses retain

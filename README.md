@@ -11,7 +11,7 @@ An interactive WebAssembly build is available at the [min-clicks website](https:
 Requires a C++20 compiler. Can be built like any standard C++ project, for example:
 
 ```sh
-g++ -std=c++20 -O3 -DNDEBUG -march=native optimal.cpp -o optimal
+g++ -std=c++20 -O3 -DNDEBUG -pthread -march=native optimal.cpp -o optimal
 ```
 
 ### Compiling to WebAssembly
@@ -43,6 +43,12 @@ Or specify board dimensions for a random board using the `--random` option:
 
 ```sh
 ./optimal --random WIDTH HEIGHT MINES SEED [--64b] [options]
+```
+
+Or run boards in bulk using the `--bulk` option:
+
+```sh
+./optimal --bulk COUNT WIDTH HEIGHT MINES [--seed SEED] [--threads THREADS] [options] > out.csv
 ```
 
 The CLI accepts any URL with compatible `b`/`m` parameters, or `b=...&m=...`.
@@ -260,10 +266,10 @@ The solver can handle every beginner, intermediate and expert board tested. Appr
 
 | Board size | Approximate throughput (optimal) | Approximate throughput (8-way) | Approximate throughput (LZiNi/HZiNi) |
 | --- | --- | --- | --- |
-| Beginner | ~1000/s | ~50000/s | ~15000/s |
-| Intermediate | ~50/s | ~12500/s | ~4000/s |
-| Expert | ~10/s | ~5000/s | ~1250/s |
-| Evil | ~2/s | - | - |
+| Beginner | ~4000/s | ~50000/s | ~15000/s |
+| Intermediate | ~450/s | ~12500/s | ~4000/s |
+| Expert | ~70/s | ~5000/s | ~1250/s |
+| Evil | ~20/s | - | - |
 
 These values are only indicative, and will vary by CPU and test conditions. Use them as an order-of-magnitude reference only. Evil boards in particular are subject to variability in the quality of the scheduling.
 

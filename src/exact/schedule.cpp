@@ -98,6 +98,11 @@ static void optimizeBlocks(const Model &m, vector<int> &order,
         }
         globalPeak = max(globalPeak, peak.back());
     }
+    // Widths are integral multiples of WEIGHT_SCALE. Reuse their exponentials
+    // across every subset instead of calling exp2 in the inner planner loop.
+    vector<double> increments(globalPeak / WEIGHT_SCALE + 1);
+    for (int w = 0; w < int(increments.size()); ++w)
+        increments[w] = exp2(w / WIDTH_EXP_SCALE);
     vector<int> optimized;
     optimized.reserve(n);
     for (const auto &block : blocks) {
@@ -107,7 +112,7 @@ static void optimizeBlocks(const Model &m, vector<int> &order,
         cost[0] = 0;
         for (int mask = 1; mask < size; ++mask)
             if (block.width[mask] <= globalPeak) {
-                double increment = exp2(block.width[mask] / (WIDTH_EXP_SCALE * WEIGHT_SCALE));
+                double increment = increments[block.width[mask] / WEIGHT_SCALE];
                 for (unsigned bits = unsigned(mask); bits; bits &= bits - 1) {
                     unsigned bit = bits & -bits;
                     double value = cost[mask ^ bit] + increment;
@@ -298,27 +303,78 @@ OrderPlan dynamicBandOrder(const Model &m, bool rows, bool reverse) {
     auto secondary = [&](int v) {
         return rows ? m.cells[v] % m.b.w : m.cells[v] / m.b.w;
     };
+    vector<int> vertexLine(n), key(n);
     vector<vector<int>> byLine(lines);
-    for (int v = 0; v < n; ++v) byLine[line(v)].push_back(v);
-    vector<int> prefix(lines + 1);
-    for (int l = 0; l < lines; ++l)
-        prefix[l + 1] = prefix[l] + int(byLine[l].size());
+    for (int v = 0; v < n; ++v) {
+        vertexLine[v] = line(v);
+        key[v] = secondary(v) * lines + vertexLine[v];
+        byLine[vertexLine[v]].push_back(v);
+    }
+    // A band's outside prefix/suffix is fixed. Cache scope endpoints in line
+    // coordinates, and inspect its vertices only when an endpoint lies inside
+    // the trial band. Candidate connectivity starts at the candidate itself;
+    // zero-island and factor lifetimes start at their first incident candidate.
+    struct Lifetime {
+        const vector<int> *vars;
+        int owner, first, last, weight;
+    };
+    vector<Lifetime> lifetimes;
+    for (int v = 0; v < int(m.edges.size()); ++v) {
+        int first = lines, last = -1;
+        if (v < n) first = last = vertexLine[v];
+        for (int u : m.edges[v]) if (u < n) {
+            first = min(first, vertexLine[u]);
+            last = max(last, vertexLine[u]);
+        }
+        if (v < n) first = vertexLine[v];
+        lifetimes.push_back({&m.edges[v], v < n ? v : -1, first, last, 3});
+    }
+    for (const auto &factor : m.factors) {
+        int first = lines, last = -1;
+        for (int v : factor.vars) {
+            first = min(first, vertexLine[v]);
+            last = max(last, vertexLine[v]);
+        }
+        lifetimes.push_back({&factor.vars, -1, first, last, 2});
+    }
+    vector<int> pos(n);
     vector<vector<OrderPlan>> bands(lines);
     for (int start = 0; start < lines; ++start)
         for (int end = start + 1; end <= min(lines, start + maxBand); ++end) {
-            vector<int> inside, trial;
+            vector<int> inside;
             for (int l = start; l < end; ++l)
                 inside.insert(inside.end(), byLine[l].begin(), byLine[l].end());
-            sort(inside.begin(), inside.end(), [&](int a, int b) {
-                return pair{secondary(a), line(a)} < pair{secondary(b), line(b)};
-            });
-            for (int l = 0; l < start; ++l)
-                trial.insert(trial.end(), byLine[l].begin(), byLine[l].end());
-            trial.insert(trial.end(), inside.begin(), inside.end());
-            for (int l = end; l < lines; ++l)
-                trial.insert(trial.end(), byLine[l].begin(), byLine[l].end());
-            auto profile = scoreOrder(m, std::move(trial), "", prefix[start], prefix[end]);
-            profile.order = std::move(inside);
+            sort(inside.begin(), inside.end(), [&](int a, int b) { return key[a] < key[b]; });
+            int count = int(inside.size());
+            for (int i = 0; i < count; ++i) pos[inside[i]] = i;
+            vector<int> delta(count + 1);
+            for (const auto &scope : lifetimes) {
+                if (scope.first >= end || scope.last < start) continue;
+                int first = scope.first < start ? -1 : count;
+                int last = scope.last >= end ? count : -1;
+                if (first == count || last == -1) {
+                    if (scope.owner >= 0) {
+                        if (first == count) first = pos[scope.owner];
+                        if (last == -1) last = first;
+                    }
+                    for (int v : *scope.vars)
+                        if (v < n && vertexLine[v] >= start && vertexLine[v] < end) {
+                            if (scope.owner < 0 && scope.first >= start) first = min(first, pos[v]);
+                            if (scope.last < end) last = max(last, pos[v]);
+                        }
+                }
+                if (first < last) {
+                    delta[max(0, first)] += scope.weight;
+                    delta[last] -= scope.weight;
+                }
+            }
+            OrderPlan profile{std::move(inside), ""};
+            int width = 0;
+            for (int t = 0; t < count; ++t) {
+                width += delta[t];
+                profile.score = max(profile.score, width / 2.0);
+                profile.totalScore += exp2(width / 8.0);
+            }
             bands[start].push_back(std::move(profile));
         }
     vector<double> peak(lines + 1, numeric_limits<double>::infinity());
@@ -357,6 +413,7 @@ Schedule schedule(const Model &m, string name) {
     return schedule(m, planOrder(m, std::move(name)));
 }
 Schedule schedule(const Model &m, const OrderPlan &plan) {
+    const bool smallBoard = m.b.w < 10 && m.b.h < 10;
     int n = (int)m.cells.size(), total = (int)m.edges.size();
     const auto &order = plan.order;
     vector<int> pos(n);
@@ -409,24 +466,12 @@ Schedule schedule(const Model &m, const OrderPlan &plan) {
             if (ff[f] == t)
                 all.push_back(f);
         for (int f : all) {
-            auto it = find(af.begin(), af.end(), f);
-            st.factorOld.push_back(it == af.end() ? -1
-                                                  : (int)(it - af.begin()));
-            st.factorTouch.push_back(find(m.factors[f].vars.begin(),
-                                          m.factors[f].vars.end(),
-                                          st.var) != m.factors[f].vars.end());
-            st.factorClose.push_back(fl[f] == t ? (m.factors[f].mine ? 1 : 0)
-                                                : -1);
-            st.factorWeight.push_back(m.factors[f].weight);
-            if (fl[f] > t) {
-                st.factorKeep.push_back((int)st.newFactors.size());
+            if (fl[f] > t)
                 st.newFactors.push_back(f);
-            } else
-                st.factorKeep.push_back(-1);
         }
         active = st.after;
         af = st.newFactors;
-        if (st.after.size() <= 24)
+        if (!smallBoard && st.after.size() <= 24)
             for (int v : st.after) {
                 vector<uint32_t> contacts;
                 for (int u : m.edges[v])
@@ -512,39 +557,41 @@ Schedule schedule(const Model &m, const OrderPlan &plan) {
             st.liveWeights.push_back(
                 {uint64_t(1) << slots[f], m.factors[f].weight});
         // A future chord has capacity 12; paying a direct click also costs 12.
-        vector<pair<int, int>> remaining;
-        for (int f = 0; f < (int)m.factors.size(); ++f)
-            if (!m.factors[f].mine && fl[f] > stepIndex) {
-                int degree = 0;
+        if (!smallBoard) {
+            vector<pair<int, int>> remaining;
+            for (int f = 0; f < (int)m.factors.size(); ++f)
+                if (!m.factors[f].mine && fl[f] > stepIndex) {
+                    int degree = 0;
+                    for (int v : m.factors[f].vars)
+                        degree += pos[v] > stepIndex;
+                    remaining.push_back({degree, f});
+                }
+            sort(remaining.begin(), remaining.end());
+            vector<int> capacity(n, 12);
+            array<uint64_t, 13> masks{};
+            for (auto [degree, f] : remaining) {
+                (void)degree;
+                int weight = 12;
                 for (int v : m.factors[f].vars)
-                    degree += pos[v] > stepIndex;
-                remaining.push_back({degree, f});
+                    if (pos[v] > stepIndex)
+                        weight = min(weight, capacity[v]);
+                if (!weight)
+                    continue;
+                for (int v : m.factors[f].vars)
+                    if (pos[v] > stepIndex)
+                        capacity[v] -= weight;
+                if (ff[f] > stepIndex)
+                    st.boundConstant += weight;
+                else
+                    masks[weight] |= uint64_t(1) << slots[f];
             }
-        sort(remaining.begin(), remaining.end());
-        vector<int> capacity(n, 12);
-        array<uint64_t, 13> masks{};
-        for (auto [degree, f] : remaining) {
-            (void)degree;
-            int weight = 12;
-            for (int v : m.factors[f].vars)
-                if (pos[v] > stepIndex)
-                    weight = min(weight, capacity[v]);
-            if (!weight)
-                continue;
-            for (int v : m.factors[f].vars)
-                if (pos[v] > stepIndex)
-                    capacity[v] -= weight;
-            if (ff[f] > stepIndex)
-                st.boundConstant += weight;
-            else
-                masks[weight] |= uint64_t(1) << slots[f];
+            for (int w = 1; w <= 12; ++w)
+                if (masks[w])
+                    st.boundMasks.push_back({masks[w], w});
         }
-        for (int w = 1; w <= 12; ++w)
-            if (masks[w])
-                st.boundMasks.push_back({masks[w], w});
         // Factors with the same remaining scope have the same future OR value.
         // For equal weights, only (#unpaid mines - #uncovered targets) matters.
-        {
+        if (!smallBoard) {
             map<pair<vector<int>, int>, FactorFold> groups;
             for (int f : st.newFactors) {
                 vector<int> scope;
@@ -588,7 +635,7 @@ Schedule schedule(const Model &m, const OrderPlan &plan) {
     // need either a direct click or one extra component seed, never both.
     vector<int> candidateAt(m.b.w * m.b.h, -1);
     for (int i = 0; i < n; ++i) candidateAt[m.cells[i]] = i;
-    for (auto &st : s.steps) {
+    if (!smallBoard) for (auto &st : s.steps) {
         int b = m.cells[st.var];
         for (int neighbor : m.b.adj[b]) {
             int a = candidateAt[neighbor];
@@ -608,5 +655,33 @@ Schedule schedule(const Model &m, const OrderPlan &plan) {
         }
     }
     return s;
+}
+vector<ReferenceFactors> referenceFactors(const Model &m, const Schedule &s) {
+    int n = int(s.steps.size());
+    vector<int> pos(n), first(m.factors.size(), n), last(m.factors.size(), -1);
+    for (int t = 0; t < n; ++t) pos[s.steps[t].var] = t;
+    for (int f = 0; f < int(m.factors.size()); ++f)
+        for (int v : m.factors[f].vars) {
+            first[f] = min(first[f], pos[v]);
+            last[f] = max(last[f], pos[v]);
+        }
+    vector<ReferenceFactors> result(n);
+    for (int t = 0; t < n; ++t) {
+        const auto &st = s.steps[t];
+        auto &layout = result[t];
+        vector<int> all = st.oldFactors;
+        for (int f = 0; f < int(m.factors.size()); ++f)
+            if (first[f] == t) all.push_back(f);
+        for (int f : all) {
+            auto old = find(st.oldFactors.begin(), st.oldFactors.end(), f);
+            layout.old.push_back(old == st.oldFactors.end() ? -1 : int(old - st.oldFactors.begin()));
+            layout.touch.push_back(find(m.factors[f].vars.begin(), m.factors[f].vars.end(), st.var) != m.factors[f].vars.end());
+            layout.close.push_back(last[f] == t ? int(m.factors[f].mine) : -1);
+            layout.weight.push_back(m.factors[f].weight);
+            auto keep = find(st.newFactors.begin(), st.newFactors.end(), f);
+            layout.keep.push_back(keep == st.newFactors.end() ? -1 : int(keep - st.newFactors.begin()));
+        }
+    }
+    return result;
 }
 } // namespace minclicks::detail

@@ -50,12 +50,18 @@ static void reportLayer(const Model &m, const Schedule &sched, const Options &op
                result.peak, result.best, result.elapsed, result.transitions,
                opt.visualize, opt.visualize ? &preview : nullptr);
 }
-static Result initial(const Model &m, const Options &opt) {
+static Result initial(const Model &m, const Options &opt, int target = -1,
+                      const string *seed = nullptr) {
     Result result;
     int n = (int)m.cells.size();
-    result.chosen = string((n + 7) / 8, '\0');
+    result.chosen = seed ? *seed : string((n + 7) / 8, '\0');
     result.best = m.evaluate(result.chosen);
     opt.report("heuristic", 0, n, 0, 0, result.best, 0, 0, true);
+    if (target >= 0 && result.best <= target) return result;
+    // The empty chord set is a legal 3BV upper bound. Unlimited optimization
+    // reaches the answer faster by going straight to the DP. Keep local search
+    // for decision queries and useful feasible bounds in explicitly limited runs.
+    if (target < 0 && opt.timeLimit == 0 && opt.maxStates == 0) return result;
     // Deterministic improving one-flip search gives an initial feasible bound.
     for (;;) {
         int best = result.best, arg = -1;
@@ -74,7 +80,10 @@ static Result initial(const Model &m, const Options &opt) {
             break;
         flip(result.chosen, arg);
         result.best = best;
+        if (target >= 0 && result.best <= target) return result;
     }
+    // On small boards the exact search is cheaper than extra incumbent starts.
+    if (m.b.w < 10 && m.b.h < 10) return result;
     // A chord that is unprofitable alone can become useful with shared flags
     // and a shared seed. Descending from dense sets escapes that local minimum.
     mt19937 rng(0x5eed);
@@ -106,21 +115,29 @@ static Result initial(const Model &m, const Options &opt) {
             result.best = cost;
             result.chosen = std::move(chosen);
         }
+        if (target >= 0 && result.best <= target) return result;
         opt.report("heuristic", 0, n, 0, 0, result.best, 0, 0);
     }
     return result;
 }
 static Result solve_reference(const Model &m, const Schedule &sched,
-                              const Options &opt) {
+                              const Options &opt, int target = -1, const string *seed = nullptr,
+                              const Result *prepared = nullptr) {
     auto start = Clock::now();
-    Result result = initial(m, opt);
+    Result result = prepared ? *prepared : initial(m, opt, target, seed);
+    if (target >= 0) {
+        if (result.best <= target) { result.exact = true; return result; }
+        result.best = target + 1; // Decision cutoff; no witness at this sentinel.
+    }
     int n = (int)m.cells.size();
+    const auto factorLayouts = referenceFactors(m, sched);
     if (opt.progress)
         cerr << "Initial upper bound: " << result.best << '\n';
     unordered_map<string, Entry> states, next;
     states.emplace("", Entry{m.base, string((n + 7) / 8, '\0')});
     double lastLog = seconds(start);
     for (const Step &st : sched.steps) {
+        const auto &factorLayout = factorLayouts[result.completed];
         if (opt.timeLimit > 0 && seconds(start) >= opt.timeLimit) {
             result.reason = "time limit";
             break;
@@ -183,17 +200,17 @@ static Result solve_reference(const Model &m, const Schedule &sched,
                         rename[label] = ++fresh;
                     out[j] = char(rename[label]);
                 }
-                for (int f = 0; f < (int)st.factorOld.size(); ++f) {
-                    int prev = st.factorOld[f];
+                for (int f = 0; f < (int)factorLayout.old.size(); ++f) {
+                    int prev = factorLayout.old[f];
                     bool used =
-                        (take && st.factorTouch[f]) ||
+                        (take && factorLayout.touch[f]) ||
                         (prev >= 0 &&
                          ((uint8_t)key[old + prev / 8] >> (prev % 8) & 1));
-                    if (st.factorClose[f] >= 0)
-                        cost += (used == bool(st.factorClose[f])) *
-                                st.factorWeight[f];
+                    if (factorLayout.close[f] >= 0)
+                        cost += (used == bool(factorLayout.close[f])) *
+                                factorLayout.weight[f];
                     else if (used) {
-                        int j = st.factorKeep[f];
+                        int j = factorLayout.keep[f];
                         out[nc + j / 8] |= char(1u << (j % 8));
                     }
                 }
@@ -265,9 +282,15 @@ static Result solve_reference(const Model &m, const Schedule &sched,
 }
 
 static Result solve_packed(const Model &m, const Schedule &sched,
-                           const Options &opt) {
+                           const Options &opt, int target = -1, const string *seed = nullptr,
+                           const Result *prepared = nullptr) {
+    const bool smallBoard = m.b.w < 10 && m.b.h < 10;
     auto start = Clock::now();
-    Result result = initial(m, opt);
+    Result result = prepared ? *prepared : initial(m, opt, target, seed);
+    if (target >= 0) {
+        if (result.best <= target) { result.exact = true; return result; }
+        result.best = target + 1;
+    }
     int n = (int)m.cells.size(), words = (n + 63) / 64;
     if (opt.progress)
         cerr << "Initial upper bound: " << result.best << '\n';
@@ -369,14 +392,14 @@ static Result solve_packed(const Model &m, const Schedule &sched,
             }
         }
         result.peak = max(result.peak, next.nodes.size());
-        if (!stopped)
+        if (!stopped && !smallBoard)
             result.dominated += next.pruneFactors(st);
         future[st.var / 64] &= ~(uint64_t(1) << (st.var % 64));
-        // Turn sampled prefix solutions into complete legal solutions by using
-        // the incumbent's decisions on the suffix. This only improves an upper
-        // bound; no state is lost and no heuristic result is called optimal.
-        if (!next.nodes.empty() && (stopped || result.completed % 8 == 7 ||
-                                    result.completed == n - 1)) {
+        // Completion trials repay their cost for decision queries and limited
+        // runs. Unlimited optimization reconstructs only the final DP winner.
+        if ((target >= 0 || opt.timeLimit > 0 || opt.maxStates > 0) &&
+            !next.nodes.empty() && (stopped || result.completed % 8 == 7 ||
+                                   result.completed == n - 1)) {
             size_t minimum = 0;
             for (size_t i = 1; i < next.nodes.size(); ++i)
                 if (next.nodes[i].cost < next.nodes[minimum].cost)
@@ -403,6 +426,11 @@ static Result solve_packed(const Model &m, const Schedule &sched,
             complete(minimum);
             for (size_t i = 0; i < next.nodes.size(); i += stride)
                 complete(i);
+            if (target >= 0 && result.best <= target) {
+                result.exact = true;
+                result.elapsed = seconds(start);
+                return result;
+            }
         }
         if (stopped)
             break;
@@ -506,8 +534,9 @@ static vector<Action> witness(const Model &m, const string &chosen, bool partial
 // Iteratively remove candidates certified by a swap or a left-click bound.
 // A swap replacement must cover every target/zero unit, flag no new mine, and
 // retain every propagation contact. Relations can change after each removal.
-static Model reduceCandidates(const Board &b) {
-        Model m(b);
+static Model reduceCandidates(const Board &b, const vector<uint8_t> *forbidden = nullptr,
+                              const vector<uint8_t> *protectedCells = nullptr) {
+        Model m(b, forbidden, protectedCells);
         int n = int(m.cells.size()), z = int(b.zeros.size());
         vector<vector<int>> contacts(n), bases(n), mines(n);
         for (int i = 0; i < n; ++i) {
@@ -547,42 +576,56 @@ static Model reduceCandidates(const Board &b) {
         for (const auto &scope : mines)
             for (int cell : scope) ++mineUsers[cell];
         // A failed certificate needs checking again only when one of the
-        // candidates it reads is removed. Swap certificates also read their
-        // replacement's factor neighbors.
-        vector<vector<uint8_t>> related(n, vector<uint8_t>(n));
-        auto intersects = [](const vector<int> &a, const vector<int> &b) {
-            size_t i = 0, j = 0;
-            while (i < a.size() && j < b.size()) {
-                if (a[i] == b[j]) return true;
-                if (a[i] < b[j]) ++i; else ++j;
-            }
-            return false;
-        };
-        for (int i = 0; i < n; ++i)
-            for (int j = 0; j < n; ++j)
-                related[i][j] = binary_search(contacts[i].begin(), contacts[i].end(), j) ||
-                    intersects(mines[i], mines[j]) || intersects(bases[i], bases[j]);
-        vector<uint8_t> pendingWitness(n, 1), pendingSwap(n, 1);
+        // candidates it reads is removed. This includes the inexpensive swap
+        // and private-mine bounds. Witness swaps also read their replacement's
+        // factor neighbors.
+        // Build the same symmetric dependency relation from shared-item users,
+        // rather than intersecting every pair of physical scopes.
+        vector<vector<int>> mineCandidates(b.w * b.h), baseCandidates(z + b.w * b.h);
+        for (int v = 0; v < n; ++v) {
+            for (int cell : mines[v]) mineCandidates[cell].push_back(v);
+            for (int cell : bases[v]) baseCandidates[cell].push_back(v);
+        }
+        vector<vector<int>> related(n);
+        vector<int> seen(n, -1);
+        for (int v = 0; v < n; ++v) {
+            auto add = [&](int u) {
+                if (seen[u] != v) { seen[u] = v; related[v].push_back(u); }
+            };
+            for (int u : contacts[v]) add(u);
+            for (int cell : mines[v])
+                for (int u : mineCandidates[cell]) add(u);
+            for (int cell : bases[v])
+                for (int u : baseCandidates[cell]) add(u);
+        }
+        CoverageCache coverage(mines, bases, mineCandidates, baseCandidates, &contactBits);
+        // Two dense overlap tables cost at most 16 MiB here. Very large models
+        // retain direct scope checks instead of adding unbounded quadratic storage.
+        CoverageCache *certificateCache = n <= 1024 ? &coverage : nullptr;
+        vector<uint8_t> pendingWitness(n, 1), pendingSwap(n, 1),
+                        pendingBasic(n, 1), pendingLeft(n, 1);
     for (;;) {
         int victim = -1;
         for (int i = 0; i < n && victim < 0; ++i)
-            if (alive[i])
-            for (int j : contacts[i]) {
-                if (!alive[j]) continue;
-                if (!subset(bases[i], bases[j]) ||
-                    !subset(mines[j], mines[i])) continue;
-                bool good = true;
-                for (int word = 0; word < words; ++word) {
-                    uint64_t required = contactBits[i][word] & active[word];
-                    if (word == j / 64) required &= ~(uint64_t(1) << (j % 64));
-                    if (required & ~contactBits[j][word]) {
-                        good = false;
+            if (alive[i] && pendingBasic[i] && (!protectedCells || !(*protectedCells)[m.cells[i]])) {
+                pendingBasic[i] = 0;
+                for (int j : contacts[i]) {
+                    if (!alive[j]) continue;
+                    if (!subset(bases[i], bases[j]) ||
+                        !subset(mines[j], mines[i])) continue;
+                    bool good = true;
+                    for (int word = 0; word < words; ++word) {
+                        uint64_t required = contactBits[i][word] & active[word];
+                        if (word == j / 64) required &= ~(uint64_t(1) << (j % 64));
+                        if (required & ~contactBits[j][word]) {
+                            good = false;
+                            break;
+                        }
+                    }
+                    if (good) {
+                        victim = i;
                         break;
                     }
-                }
-                if (good) {
-                    victim = i;
-                    break;
                 }
             }
         // A chord can also be redundant without a single replacement. For any
@@ -591,7 +634,8 @@ static Model reduceCandidates(const Board &b) {
         // Maximize that liability minus base units already covered by X.
         if (victim < 0) {
             for (int v = 0; v < n && victim < 0; ++v) {
-                if (!alive[v]) continue;
+                if (!alive[v] || !pendingLeft[v] || (protectedCells && (*protectedCells)[m.cells[v]])) continue;
+                pendingLeft[v] = 0;
                 vector<int> adjacent;
                 for (int other : contacts[v])
                     if (alive[other]) adjacent.push_back(other);
@@ -653,20 +697,22 @@ static Model reduceCandidates(const Board &b) {
         }
         if (victim < 0)
             for (int v = 0; v < n; ++v)
-                if (alive[v] && pendingWitness[v]) {
+                if (alive[v] && pendingWitness[v] &&
+                    (!protectedCells || !(*protectedCells)[m.cells[v]])) {
                     pendingWitness[v] = 0;
-                    if (witnessDeletion(v, contacts, mines, bases, alive)) {
+                    if (witnessDeletion(v, contacts, mines, bases, alive, certificateCache)) {
                         victim = v;
                         break;
                     }
                 }
         if (victim < 0)
             for (int v = 0; v < n && victim < 0; ++v)
-                if (alive[v] && pendingSwap[v]) {
+                if (alive[v] && pendingSwap[v] &&
+                    (!protectedCells || !(*protectedCells)[m.cells[v]])) {
                     pendingSwap[v] = 0;
                     for (int replacement : contacts[v])
                         if (alive[replacement] &&
-                            witnessSwap(v, replacement, contacts, mines, bases, alive)) {
+                            witnessSwap(v, replacement, contacts, mines, bases, alive, certificateCache)) {
                             victim = v;
                             break;
                         }
@@ -675,28 +721,41 @@ static Model reduceCandidates(const Board &b) {
         alive[victim] = 0;
         active[victim / 64] &= ~(uint64_t(1) << (victim % 64));
         for (int cell : mines[victim]) --mineUsers[cell];
-        for (int v = 0; v < n; ++v)
-            if (related[v][victim]) {
-                pendingWitness[v] = pendingSwap[v] = 1;
+        for (int v : related[victim]) {
+                pendingWitness[v] = pendingSwap[v] = pendingBasic[v] = pendingLeft[v] = 1;
                 for (int u : contacts[v]) pendingSwap[u] = 1;
             }
     }
 }
 static Result searchModel(const Model &m, const Options &opt, Schedule &sched,
-                          bool wholeBoard = true) {
+                          bool wholeBoard = true, int target = -1,
+                          const string *seed = nullptr,
+                          const vector<uint8_t> *protectedCells = nullptr) {
+    Result prepared;
+    if (target >= 0) {
+        // A legal witness at the known optimum settles the query immediately.
+        // Try the previous witness before spending time planning any DP order.
+        prepared = initial(m, opt, target, seed);
+        if (prepared.best <= target) { prepared.exact = true; return prepared; }
+    }
     int emptyCost = m.evaluate(string((m.cells.size() + 7) / 8, '\0'));
     OrderPlan plan = planOrder(m, "columns");
     vector<OrderPlan> alternatives;
     if (wholeBoard && m.cells.size() >= 250) alternatives.push_back(plan);
     opt.report("ordering", 0, int(m.cells.size()), 0, 0, emptyCost, 0, 0, true);
     vector<string> orders = {"rows", "columns-reverse", "rows-reverse"};
-    if (m.b.h <= m.b.w)
+    const bool smallBoard = m.b.w < 10 && m.b.h < 10;
+    if (!smallBoard && m.b.h <= m.b.w)
         orders.insert(orders.end(), {"columns-dp", "columns-dp-reverse",
                                      "columns-dp2", "columns-dp2-reverse"});
-    if (m.b.w <= m.b.h)
+    if (!smallBoard && m.b.w <= m.b.h)
         orders.insert(orders.end(), {"rows-dp", "rows-dp-reverse",
                                      "rows-dp2", "rows-dp2-reverse"});
     for (const auto &name : orders) {
+        // Two-line subset permutations can cost more than the entire search
+        // on narrow frontiers. Keep cheap strip/band planning, and reserve
+        // these larger permutations for a still-wide best frontier.
+        if (name.find("-dp2") != string::npos && plan.score < 40) continue;
         opt.report("ordering", 0, int(m.cells.size()), 0, 0, emptyCost, 0, 0);
         auto candidate = planOrder(m, name);
         if (wholeBoard && m.cells.size() >= 250) alternatives.push_back(candidate);
@@ -705,7 +764,7 @@ static Result searchModel(const Model &m, const Options &opt, Schedule &sched,
              candidate.totalScore < plan.totalScore))
             plan = std::move(candidate);
     }
-    if (m.cells.size() >= 64)
+    if (!smallBoard && m.cells.size() >= 64)
         for (bool rows : {false, true})
             for (bool reverse : {false, true}) {
                 auto candidate = dynamicBandOrder(m, rows, reverse);
@@ -718,7 +777,7 @@ static Result searchModel(const Model &m, const Options &opt, Schedule &sched,
     // wide enough that reducing the exponential search can repay that cost.
     const double rawWork = plan.totalScore;
     const auto rawOrder = plan.order;
-    if (plan.score >= 60)
+    if (!smallBoard && plan.score >= 60)
         plan = refineOrder(m, std::move(plan));
     // Wide boards need a global comparison of the whole frontier trajectory.
     // Width alone counts dependent live factors as independent and can prefer
@@ -763,12 +822,17 @@ static Result searchModel(const Model &m, const Options &opt, Schedule &sched,
         }
     }
     sched = schedule(m, plan);
-    return sched.packed ? solve_packed(m, sched, opt)
-                        : solve_reference(m, sched, opt);
+    // Geometric pair deletion is safe only when it cannot delete a variable
+    // whose presence is needed by the query's extra OR factor.
+    if (protectedCells)
+        for (auto &step : sched.steps)
+            if ((*protectedCells)[m.cells[step.var]]) step.chordDominators.clear();
+    return sched.packed ? solve_packed(m, sched, opt, target, seed, target >= 0 ? &prepared : nullptr)
+                        : solve_reference(m, sched, opt, target, seed, target >= 0 ? &prepared : nullptr);
 }
 } // namespace minclicks::detail
 namespace minclicks {
-ExactResult solveExact(const Board &b, const ExactOptions &opt) {
+static ExactResult solveExactImpl(const Board &b, const ExactOptions &opt) {
     using namespace detail;
     auto started = Clock::now();
     opt.report("preparing", 0, 0, 0, 0, -1, 0, 0, true);
@@ -877,8 +941,188 @@ ExactResult solveExact(const Board &b, const ExactOptions &opt) {
     }
     out.candidates = int(m.cells.size());
     out.removed = m.removed;
+    // Report the complete solve, including model/reductions, planning,
+    // physical validation and requested witness construction, not only DP.
+    out.elapsed = seconds(started);
     opt.report(out.exact ? "complete" : "limited", out.completed, out.candidates,
                0, out.peak, out.clicks, out.elapsed, out.transitions, true);
+    return out;
+}
+ExactResult solveExact(const Board &b, const ExactOptions &opt) {
+    auto started = detail::Clock::now();
+    auto out = solveExactImpl(b, opt);
+    // The implementation has now also released its model/schedules and
+    // returned from the final progress callback.
+    out.elapsed = detail::seconds(started);
+    return out;
+}
+OptimalAnalysis analyzeOptimal(const Board &b, const AnalysisOptions &options,
+                               const ExactResult *knownSolution) {
+    using namespace detail;
+    const auto started = Clock::now();
+    const int cells = b.w * b.h;
+    OptimalAnalysis out;
+    out.chords.assign(cells, OptimalTile::Unknown);
+    out.flags.assign(cells, OptimalTile::Unknown);
+    for (int p = 0; p < cells; ++p) out.total += b.number[p] > 0 || b.mine[p];
+    auto publish = [&] {
+        out.elapsed = seconds(started);
+        out.settled = 0;
+        for (int p = 0; p < cells; ++p) {
+            if (b.number[p] > 0) out.settled += out.chords[p] != OptimalTile::Unknown;
+            if (b.mine[p]) out.settled += out.flags[p] != OptimalTile::Unknown;
+        }
+        if (options.onProgress) options.onProgress(out);
+    };
+    publish();
+    if (knownSolution && knownSolution->exact && !knownSolution->actions.empty())
+        out.solution = *knownSolution;
+    else {
+        auto local = options.solver;
+        local.includeActions = true;
+        out.solution = solveExact(b, local);
+    }
+    if (!out.solution.exact) {
+        out.reason = out.solution.reason;
+        publish();
+        return out;
+    }
+    const int optimum = out.solution.clicks;
+    // Witness masks encode observed absence (1) and presence (2). Once both
+    // occur, the tile is optional and no individual query is necessary.
+    vector<uint8_t> seenChords(cells), seenFlags(cells), warm(cells);
+    auto observe = [&](const vector<Action> &actions) {
+        vector<uint8_t> chords(cells), flags(cells);
+        for (const auto &a : actions) {
+            if (a.cell < 0 || a.cell >= cells) throw logic_error("Invalid analysis witness");
+            if (a.kind == 'C') chords[a.cell] = 1;
+            if (a.kind == 'F') flags[a.cell] = 1;
+        }
+        warm = chords;
+        for (int p = 0; p < cells; ++p) {
+            if (b.number[p] > 0) {
+                seenChords[p] |= chords[p] ? 2 : 1;
+                if (seenChords[p] == 3) {
+                    if (out.chords[p] == OptimalTile::Forced || out.chords[p] == OptimalTile::Forbidden)
+                        throw logic_error("Contradictory chord certificate");
+                    out.chords[p] = OptimalTile::Optional;
+                }
+            }
+            if (b.mine[p]) {
+                seenFlags[p] |= flags[p] ? 2 : 1;
+                if (seenFlags[p] == 3) {
+                    if (out.flags[p] == OptimalTile::Forced || out.flags[p] == OptimalTile::Forbidden)
+                        throw logic_error("Contradictory flag certificate");
+                    out.flags[p] = OptimalTile::Optional;
+                }
+            }
+        }
+    };
+    observe(out.solution.actions);
+    auto propagate = [&] {
+        bool changed;
+        do {
+            changed = false;
+            auto certify = [&](OptimalTile &slot, OptimalTile value) {
+                if (slot == value) return;
+                if (slot != OptimalTile::Unknown) throw logic_error("Contradictory optimal tile certificate");
+                slot = value; changed = true;
+            };
+            for (int p = 0; p < cells; ++p) {
+                if (b.number[p] > 0 && out.chords[p] == OptimalTile::Forced)
+                    for (int q : b.adj[p]) if (b.mine[q]) certify(out.flags[q], OptimalTile::Forced);
+                if (!b.mine[p]) continue;
+                if (out.flags[p] == OptimalTile::Forbidden)
+                    for (int q : b.adj[p]) if (b.number[q] > 0) certify(out.chords[q], OptimalTile::Forbidden);
+                int possible = 0, last = -1;
+                for (int q : b.adj[p])
+                    if (b.number[q] > 0 && out.chords[q] != OptimalTile::Forbidden) {
+                        ++possible; last = q;
+                    }
+                if (!possible) certify(out.flags[p], OptimalTile::Forbidden);
+                else if (possible == 1 && out.flags[p] == OptimalTile::Forced)
+                    certify(out.chords[last], OptimalTile::Forced);
+            }
+        } while (changed);
+    };
+    propagate(); publish();
+    while (out.settled < out.total) {
+        if (options.solver.timeLimit > 0 && seconds(started) >= options.solver.timeLimit) {
+            out.reason = "analysis time limit";
+            break;
+        }
+        // Prefer mines: excluding a flag can settle all adjacent chords.
+        // Within each kind, test the most connected unsettled tile first.
+        int cell = -1, bestScore = -1;
+        bool flagQuery = false;
+        for (int p = 0; p < cells; ++p) {
+            bool flag = b.mine[p];
+            if (!(flag || b.number[p] > 0) ||
+                (flag ? out.flags[p] : out.chords[p]) != OptimalTile::Unknown) continue;
+            int score = flag ? 16 : 0;
+            for (int q : b.adj[p])
+                score += (b.mine[q] ? out.flags[q] : out.chords[q]) == OptimalTile::Unknown;
+            if (score > bestScore) { bestScore = score; cell = p; flagQuery = flag; }
+        }
+        if (cell < 0) throw logic_error("Unsettled analysis tile missing");
+        const bool requirePresent = (flagQuery ? seenFlags[cell] : seenChords[cell]) == 1;
+        vector<uint8_t> forbidden(cells), protectedCells(cells);
+        for (int p = 0; p < cells; ++p)
+            forbidden[p] = out.chords[p] == OptimalTile::Forbidden;
+        if (!requirePresent) {
+            if (flagQuery) {
+                for (int q : b.adj[cell]) if (b.number[q] > 0) forbidden[q] = 1;
+            } else forbidden[cell] = 1;
+        } else if (flagQuery) {
+            for (int q : b.adj[cell])
+                if (b.number[q] > 0 && !forbidden[q]) protectedCells[q] = 1;
+        } else protectedCells[cell] = 1;
+        out.checkingCell = cell;
+        ++out.checks;
+        publish();
+        Model m = b.w * b.h <= 81 ? Model(b, &forbidden, &protectedCells)
+                                 : reduceCandidates(b, &forbidden, &protectedCells);
+        if (requirePresent) {
+            // A violated constraint alone costs more than the known optimum.
+            // Represent it as an ordinary weighted OR factor, so factor folding
+            // and state dominance retain their existing, exact proofs.
+            Factor requirement{{}, false, optimum + 1};
+            for (int i = 0; i < int(m.cells.size()); ++i)
+                if (protectedCells[m.cells[i]]) requirement.vars.push_back(i);
+            if (requirement.vars.empty()) throw logic_error("Required action has no candidate");
+            m.factors.push_back(std::move(requirement));
+        }
+        string seed((m.cells.size() + 7) / 8, '\0');
+        for (int i = 0; i < int(m.cells.size()); ++i) if (warm[m.cells[i]]) flip(seed, i);
+        auto local = options.solver;
+        local.visualize = false;
+        local.progress = false;
+        if (local.timeLimit > 0) local.timeLimit = max(1e-9, local.timeLimit - seconds(started));
+        local.onProgress = [&](const Progress &) { publish(); };
+        Schedule sched;
+        auto r = searchModel(m, local, sched, true, optimum, &seed, &protectedCells);
+        if (r.best <= optimum) {
+            // Every accepted alternative must have the original physical cost
+            // and actually satisfy the requested opposite action.
+            auto actions = witness(m, r.chosen);
+            bool present = false;
+            for (const auto &a : actions)
+                if (a.cell == cell && a.kind == (flagQuery ? 'F' : 'C')) present = true;
+            if (int(actions.size()) != optimum || present != requirePresent)
+                throw logic_error("Invalid constrained optimal witness");
+            observe(actions);
+        } else if (r.exact) {
+            (flagQuery ? out.flags[cell] : out.chords[cell]) =
+                requirePresent ? OptimalTile::Forbidden : OptimalTile::Forced;
+        } else {
+            out.reason = r.reason;
+            break;
+        }
+        propagate(); publish();
+    }
+    out.checkingCell = -1;
+    out.complete = out.settled == out.total;
+    publish();
     return out;
 }
 } // namespace minclicks

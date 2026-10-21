@@ -52,8 +52,29 @@ struct ExactResult {
     size_t peak = 0, transitions = 0, dominated = 0;
     int completed = 0, candidates = 0, removed = 0, maxConn = 0, maxFactors = 0,
         attempts = 1;
-    double elapsed = 0;
+    double elapsed = 0; // Complete solveExact wall time, including preparation and witnesses.
     std::string order, engine, reason;
 };
 ExactResult solveExact(const Board &board, const ExactOptions &options = {});
+
+enum class OptimalTile : uint8_t { Unknown = 0, Optional = 1, Forced = 2, Forbidden = 3 };
+struct OptimalAnalysis {
+    ExactResult solution;
+    // Physical-cell arrays: chords classify nonzero numbers; flags classify mines.
+    // Other cells stay Unknown and are excluded from total/settled.
+    std::vector<OptimalTile> chords, flags;
+    int settled = 0, total = 0, checks = 0, checkingCell = -1;
+    bool complete = false;
+    double elapsed = 0;
+    std::string reason;
+};
+struct AnalysisOptions {
+    ExactOptions solver;
+    // Snapshot is borrowed for the duration of the callback. Unknown is never
+    // treated as forbidden, including when a resource limit interrupts a check.
+    std::function<void(const OptimalAnalysis &)> onProgress;
+};
+OptimalAnalysis analyzeOptimal(const Board &board, const AnalysisOptions &options = {},
+                               // When supplied, an exact solveExact result for this board.
+                               const ExactResult *knownSolution = nullptr);
 } // namespace minclicks

@@ -18,8 +18,7 @@ struct Step {
     // Earlier selected chords that make taking this chord redundant.
     vector<int> chordDominators;
     vector<int> before, expanded, after, keep, neighbors;
-    vector<int> oldFactors, newFactors, factorOld, factorTouch, factorClose,
-        factorKeep, factorWeight;
+    vector<int> oldFactors, newFactors;
     int freshZeros = 0;
     uint64_t touchMask = 0, closeMines = 0, closeTargets = 0;
     uint64_t mineMask = 0;
@@ -49,6 +48,12 @@ struct OrderPlan {
     string name;
     double score = 0, totalScore = 0;
 };
+// Only the byte-key fallback needs per-layer factor remapping. The packed
+// engine uses stable factor slots and never allocates these vectors.
+struct ReferenceFactors {
+    vector<int> old, touch, close, keep, weight;
+};
+vector<ReferenceFactors> referenceFactors(const Model &model, const Schedule &schedule);
 OrderPlan planOrder(const Model &model, string name);
 OrderPlan refineOrder(const Model &model, OrderPlan plan);
 OrderPlan dynamicBandOrder(const Model &model, bool rows, bool reverse);

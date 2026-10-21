@@ -1,5 +1,8 @@
 #pragma once
 #include "common.hpp"
+#ifdef __BMI2__
+#include <immintrin.h>
+#endif
 
 namespace minclicks::detail {
 
@@ -27,24 +30,95 @@ inline bool witnessesWithinBudget(vector<pair<uint64_t, uint64_t>> &costly,
     return !violates(violates, 0, 0, 0);
 }
 
+// Physical overlap does not change during reduction. Build a row lazily from
+// inverted item users, and reuse it for every later deletion/swap certificate.
+struct CoverageCache {
+    const vector<vector<int>> &mines, &bases, &mineUsers, &baseUsers;
+    vector<vector<uint64_t>> mineRows, baseRows;
+    const vector<vector<uint64_t>> *contactBits;
+    CoverageCache(const vector<vector<int>> &m, const vector<vector<int>> &b,
+                  const vector<vector<int>> &mu, const vector<vector<int>> &bu,
+                  const vector<vector<uint64_t>> *links = nullptr)
+        : mines(m), bases(b), mineUsers(mu), baseUsers(bu),
+          mineRows(m.size()), baseRows(m.size()), contactBits(links) {}
+    bool adjacent(int a, int b, const vector<vector<int>> &contacts) const {
+        if (contactBits) return ((*contactBits)[a][b / 64] >> (b % 64)) & 1;
+        return binary_search(contacts[a].begin(), contacts[a].end(), b);
+    }
+    const vector<uint64_t> &row(int v, bool mine) {
+        auto &result = (mine ? mineRows : baseRows)[v];
+        if (result.empty()) {
+            result.resize(mines.size());
+            const auto &items = (mine ? mines : bases)[v];
+            const auto &users = mine ? mineUsers : baseUsers;
+            for (size_t i = 0; i < items.size(); ++i)
+                for (int u : users[items[i]]) result[u] |= uint64_t(1) << i;
+        }
+        return result;
+    }
+};
+
+// Preserve the original sorted difference's bit numbering. Large original
+// scopes can still have small differences: retain the direct fallback for them.
+struct CoverageProjection {
+    const vector<int> *items = nullptr;
+    const vector<vector<int>> *scopes = nullptr;
+    const vector<uint64_t> *overlaps = nullptr;
+    uint64_t selected = 0;
+    CoverageProjection() = default;
+    CoverageProjection(const vector<uint64_t> &row, uint64_t selected)
+        : overlaps(&row), selected(selected) {}
+    CoverageProjection(const vector<int> &items, const vector<vector<int>> &scopes,
+                       int owner, bool mine, CoverageCache *cache)
+        : items(&items), scopes(&scopes) {
+        if (cache && scopes[owner].size() <= 63) {
+            overlaps = &cache->row(owner, mine);
+            for (int item : items)
+                selected |= uint64_t(1) << (lower_bound(scopes[owner].begin(), scopes[owner].end(), item) - scopes[owner].begin());
+        }
+    }
+    uint64_t mask(int u) const {
+        uint64_t result = 0;
+        if (overlaps) {
+#ifdef __BMI2__
+            return _pext_u64((*overlaps)[u], selected);
+#else
+            uint64_t hits = (*overlaps)[u], bit = 1;
+            for (uint64_t scan = selected; scan; scan &= scan - 1, bit <<= 1)
+                if (hits & (scan & -scan)) result |= bit;
+#endif
+        } else {
+            for (size_t i = 0; i < items->size(); ++i)
+                if (binary_search((*scopes)[u].begin(), (*scopes)[u].end(), (*items)[i]))
+                    result |= uint64_t(1) << i;
+        }
+        return result;
+    }
+};
+
 // Certify deletion using actual mine-sharing witnesses, rather than assuming
 // that every non-private flag is free. Failure or a search limit keeps v.
 inline bool witnessDeletion(int v, const vector<vector<int>> &contacts,
                             const vector<vector<int>> &mines,
                             const vector<vector<int>> &bases,
-                            const vector<uint8_t> &alive) {
+                            const vector<uint8_t> &alive, CoverageCache *cache = nullptr) {
     if (mines[v].size() > 63 || bases[v].size() > 63) return false;
     struct Near { int id; uint64_t mines = 0, bases = 0; };
     vector<Near> neighbors, witnesses;
+    const vector<uint64_t> *mineHits = cache ? &cache->row(v, true) : nullptr;
+    const vector<uint64_t> *baseHits = cache ? &cache->row(v, false) : nullptr;
     for (int u = 0; u < int(alive.size()); ++u) {
         if (!alive[u] || u == v) continue;
         Near item{u};
-        for (size_t i = 0; i < mines[v].size(); ++i)
+        if (mineHits) item.mines = (*mineHits)[u];
+        else for (size_t i = 0; i < mines[v].size(); ++i)
             if (binary_search(mines[u].begin(), mines[u].end(), mines[v][i]))
                 item.mines |= uint64_t(1) << i;
-        bool adjacent = binary_search(contacts[v].begin(), contacts[v].end(), u);
+        bool adjacent = cache ? cache->adjacent(v, u, contacts) :
+            binary_search(contacts[v].begin(), contacts[v].end(), u);
         if (!item.mines && !adjacent) continue;
-        for (size_t i = 0; i < bases[v].size(); ++i)
+        if (baseHits) item.bases = (*baseHits)[u];
+        else for (size_t i = 0; i < bases[v].size(); ++i)
             if (binary_search(bases[u].begin(), bases[u].end(), bases[v][i]))
                 item.bases |= uint64_t(1) << i;
         if (adjacent) neighbors.push_back(item);
@@ -55,7 +129,8 @@ inline bool witnessDeletion(int v, const vector<vector<int>> &contacts,
     vector<int> chosen;
     int visited = 0;
     auto adjacent = [&](int a, int b) {
-        return binary_search(contacts[a].begin(), contacts[a].end(), b);
+        return cache ? cache->adjacent(a, b, contacts) :
+            binary_search(contacts[a].begin(), contacts[a].end(), b);
     };
     auto check = [&](auto &&self, size_t start, uint64_t mineHits,
                      uint64_t baseHits) -> bool {
@@ -107,47 +182,67 @@ inline bool witnessDeletion(int v, const vector<vector<int>> &contacts,
 inline bool witnessSwap(int c, int d, const vector<vector<int>> &contacts,
                         const vector<vector<int>> &mines,
                         const vector<vector<int>> &bases,
-                        const vector<uint8_t> &alive) {
+                        const vector<uint8_t> &alive, CoverageCache *cache = nullptr) {
     auto difference = [](const vector<int> &a, const vector<int> &b) {
         vector<int> result;
         set_difference(a.begin(), a.end(), b.begin(), b.end(), back_inserter(result));
         return result;
     };
-    auto savedMines = difference(mines[c], mines[d]);
-    auto lostBases = difference(bases[c], bases[d]);
-    auto addedMines = difference(mines[d], mines[c]);
-    auto addedBases = difference(bases[d], bases[c]);
-    if (lostBases.size() > 1 + savedMines.size() ||
-        addedMines.size() + lostBases.size() > savedMines.size() + addedBases.size())
+    vector<int> savedMines, lostBases, addedMines, addedBases;
+    CoverageProjection saved, lost, addedBase, addedMine;
+    int savedCount, lostCount, addedMineCount, addedBaseCount;
+    if (cache && mines[c].size() <= 63 && mines[d].size() <= 63 &&
+        bases[c].size() <= 63 && bases[d].size() <= 63) {
+        const auto &mc = cache->row(c, true), &md = cache->row(d, true);
+        const auto &bc = cache->row(c, false), &bd = cache->row(d, false);
+        auto missing = [](size_t size, uint64_t shared) {
+            return ((uint64_t(1) << size) - 1) & ~shared;
+        };
+        uint64_t sm = missing(mines[c].size(), mc[d]);
+        uint64_t lb = missing(bases[c].size(), bc[d]);
+        uint64_t am = missing(mines[d].size(), md[c]);
+        uint64_t ab = missing(bases[d].size(), bd[c]);
+        savedCount = popcount(sm); lostCount = popcount(lb);
+        addedMineCount = popcount(am); addedBaseCount = popcount(ab);
+        saved = CoverageProjection(mc, sm); lost = CoverageProjection(bc, lb);
+        addedBase = CoverageProjection(bd, ab); addedMine = CoverageProjection(md, am);
+    } else {
+        savedMines = difference(mines[c], mines[d]);
+        lostBases = difference(bases[c], bases[d]);
+        addedMines = difference(mines[d], mines[c]);
+        addedBases = difference(bases[d], bases[c]);
+        savedCount = int(savedMines.size()); lostCount = int(lostBases.size());
+        addedMineCount = int(addedMines.size()); addedBaseCount = int(addedBases.size());
+        saved = CoverageProjection(savedMines, mines, c, true, cache);
+        lost = CoverageProjection(lostBases, bases, c, false, cache);
+        addedBase = CoverageProjection(addedBases, bases, d, false, cache);
+        addedMine = CoverageProjection(addedMines, mines, d, true, cache);
+    }
+    if (lostCount > 1 + savedCount ||
+        addedMineCount + lostCount > savedCount + addedBaseCount)
         return false;
     auto adjacent = [&](int a, int b) {
-        return binary_search(contacts[a].begin(), contacts[a].end(), b);
+        return cache ? cache->adjacent(a, b, contacts) :
+            binary_search(contacts[a].begin(), contacts[a].end(), b);
     };
     vector<int> neighbors;
     for (int u : contacts[c])
         if (alive[u] && u != d && !adjacent(d, u)) neighbors.push_back(u);
     int visited = 0;
     for (bool swap : {false, true}) {
-        int goodCount = int(savedMines.size() + (swap ? addedBases.size() : 0));
-        int badCount = int(lostBases.size() + (swap ? addedMines.size() : 0));
+        int goodCount = savedCount + (swap ? addedBaseCount : 0);
+        int badCount = lostCount + (swap ? addedMineCount : 0);
         if (goodCount > 63 || badCount > 63) return false;
         int budget = swap ? 0 : 1;
         vector<uint64_t> good(alive.size()), bad(alive.size());
         vector<int> witnesses;
-        auto mask = [](const vector<int> &items, const vector<int> &covered) {
-            uint64_t result = 0;
-            for (size_t i = 0; i < items.size(); ++i)
-                if (binary_search(covered.begin(), covered.end(), items[i]))
-                    result |= uint64_t(1) << i;
-            return result;
-        };
         for (int u = 0; u < int(alive.size()); ++u) {
             if (!alive[u] || u == c || u == d) continue;
-            good[u] = mask(savedMines, mines[u]);
-            bad[u] = mask(lostBases, bases[u]);
+            good[u] = saved.mask(u);
+            bad[u] = lost.mask(u);
             if (swap) {
-                good[u] |= mask(addedBases, bases[u]) << savedMines.size();
-                bad[u] |= mask(addedMines, mines[u]) << lostBases.size();
+                good[u] |= addedBase.mask(u) << savedCount;
+                bad[u] |= addedMine.mask(u) << lostCount;
             }
             if (good[u]) witnesses.push_back(u);
         }
